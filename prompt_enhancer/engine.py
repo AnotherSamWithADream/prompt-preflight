@@ -443,9 +443,11 @@ def _run_cli(
 
     try:
         proc = _invoke(cfg.cli_bare)
-        if proc.returncode != 0 and cfg.cli_bare:
-            # `--bare` can bypass the interactive login on some Claude Code versions
-            # (claude reports "Not logged in"); retry once without it before giving up.
+        if proc.returncode != 0:
+            # Retry once (always without --bare). Covers two real, live-observed failures:
+            # (1) `--bare` bypasses the interactive login on some Claude Code versions
+            #     (claude reports "Not logged in"); (2) a transient, intermittent non-zero
+            #     exit from claude. A timeout is fast-failed below, never retried.
             proc = _invoke(False)
     except subprocess.TimeoutExpired:
         return _fail_open(raw_prompt, "timeout", start, "cli")

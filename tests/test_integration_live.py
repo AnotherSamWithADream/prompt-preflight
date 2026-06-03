@@ -141,3 +141,21 @@ def test_proxy_injects_real_enhancement_end_to_end():
         server.server_close()
         up.shutdown()
         up.server_close()
+
+
+@pytest.mark.live
+@requires_live
+def test_launcher_drives_real_claude_through_proxy(capsys):
+    """The interactive machinery, live. With no TTY the launcher uses print mode, but the
+    full path still runs: it enhances the first prompt, starts the proxy, and a REAL claude
+    runs through it to a real answer. (The only thing this can't cover is the TUI keystroke
+    loop, which is claude's own terminal UI, not this tool's code.)"""
+    from prompt_enhancer import launcher
+
+    prompt = "explain what a python decorator is in two short sentences for a beginner please"
+    code = launcher.launch(prompt.split())
+    err = capsys.readouterr().err
+    # The launcher started the proxy and wired claude through it...
+    assert "follow-up prompts are enhanced" in err
+    # ...and real claude ran through that proxy and completed successfully.
+    assert code == 0

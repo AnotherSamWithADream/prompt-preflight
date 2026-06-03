@@ -422,6 +422,19 @@ def test_cli_bare_failure_retries_without_bare(monkeypatch):
     assert any("--bare" in c for c in calls) and any("--bare" not in c for c in calls)
 
 
+def test_cli_transient_failure_retries_once(monkeypatch):
+    # cli_bare is off by default; a transient non-zero exit must still be retried once.
+    calls = []
+
+    def fake_run(cmd, **kw):
+        calls.append(cmd)
+        return _completed("transient", returncode=1) if len(calls) == 1 else _completed(PLAUSIBLE)
+
+    monkeypatch.setattr(engine.subprocess, "run", fake_run)
+    r = enhance(LONG, backend="cli", config=Config())
+    assert r.enhanced and r.text == PLAUSIBLE and len(calls) == 2
+
+
 def test_cache_results_memoizes(monkeypatch):
     calls = {"n": 0}
     monkeypatch.setattr(

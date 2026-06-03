@@ -6,6 +6,19 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+## [0.2.3] - 2026-06-03
+
+### Fixed
+- **`cli` backend now retries once on a transient failure.** `claude -p` occasionally
+  exits non-zero for a transient reason; previously only the `--bare` case was retried, so
+  a blip meant a silently-skipped enhancement. It now retries once (without `--bare`) on any
+  fast non-zero exit (timeouts are still fast-failed, never retried). Found by running the
+  launcher end-to-end against real `claude`.
+
+### Added
+- Live test that drives the **real `enhance` launcher** end-to-end (enhance first prompt →
+  proxy → real `claude`), covering the interactive machinery short of the TUI keystroke loop.
+
 ## [0.2.2] - 2026-06-03
 
 ### Fixed
