@@ -56,6 +56,10 @@ class Config:
     timeout: float = 15.0  # seconds before fail-open
     cli_bare: bool = True  # use `--bare` (faster startup; skips hook/skill/MCP discovery)
 
+    # Extra arguments always passed to the `claude` launched by `enhance`, e.g.
+    # ("--model", "opus"). CLI args given to `enhance` are appended after these (so they win).
+    claude_args: tuple = ()
+
     # --- OpenAI / Ollama backends ------------------------------------------
     openai_model: str = "gpt-4o-mini"
     openai_key_env: str = "OPENAI_API_KEY"
@@ -144,6 +148,7 @@ _ENV_MAP = {
     "PROMPT_ENHANCER_MAX_TURNS": "max_turns",
     "PROMPT_ENHANCER_TIMEOUT": "timeout",
     "PROMPT_ENHANCER_CLI_BARE": "cli_bare",
+    "PROMPT_ENHANCER_CLAUDE_ARGS": "claude_args",
     "PROMPT_ENHANCER_OPENAI_MODEL": "openai_model",
     "PROMPT_ENHANCER_OPENAI_KEY_ENV": "openai_key_env",
     "PROMPT_ENHANCER_OPENAI_BASE_URL": "openai_base_url",

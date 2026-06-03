@@ -7,18 +7,23 @@ message is the enhanced prompt. A local proxy also runs, so follow-up prompts yo
 the session are enhanced too (the first prompt is skipped so it isn't enhanced twice).
 When ``claude`` exits, the proxy stops.
 
-Argument handling:
+Argument handling -- ``enhance [-q] [-m TEXT] [PROMPT...] [CLAUDE FLAGS...] [-- CLAUDE ARGS...]``:
 
-* ``enhance <words...>``            -> the words are your prompt (enhanced, then sent)
-* ``enhance -m "<prompt>"``         -> explicit prompt (robust for prompts starting with -)
-* ``enhance <prompt> --flag ...``   -> leading words = prompt; flags go to claude
-* ``enhance --flag ... -- <prompt>``-> everything after ``--`` is the prompt
-* ``enhance --flag ...``            -> no initial prompt; just launch claude through the proxy
-* ``enhance``                       -> plain interactive claude through the proxy
-* ``enhance --serve-only [...]``    -> run only the proxy
+* ``enhance <words...>``               -> the words are your prompt (enhanced, then sent)
+* ``enhance -m "<prompt>"``            -> explicit prompt (robust for prompts starting with -)
+* ``enhance <prompt> --model opus``    -> leading words = prompt; trailing flags go to claude
+* ``enhance <prompt> -- <claude args>``-> everything after ``--`` is passed to claude verbatim
+* ``enhance -- <claude args>``         -> no prompt; launch claude through the proxy with those args
+* ``enhance``                          -> plain interactive claude through the proxy
+* ``enhance --serve-only [...]``       -> run only the proxy
 
-Launcher options: ``-m/--message <text>``, ``-q/--quiet`` (don't echo the rewrite).
-A ``//raw`` prefix or a leading ``/`` (slash command) on the prompt skips enhancement.
+Pass any ``claude`` parameters either as trailing flags or, to be unambiguous, after ``--``
+(e.g. ``enhance "fix the bug" -- --model opus --permission-mode plan --add-dir ./src``).
+Persistent defaults can be set with the ``claude_args`` config field /
+``PROMPT_ENHANCER_CLAUDE_ARGS`` (CLI args are appended after them, so they take precedence).
+
+Launcher options: ``-m/--message <text>``, ``-q/--quiet`` (don't echo the rewrite). A
+``//raw`` prefix or a leading ``/`` (slash command) on the prompt skips enhancement.
 """
 
 from __future__ import annotations
@@ -44,39 +49,54 @@ def _interactive_capable() -> bool:
         return False
 
 
-def parse_launcher_opts(args):
-    """Pull launcher-only options (``-q/--quiet``, ``-m/--message``) out of ``args``.
-    Returns ``(quiet, message_or_None, remaining_args)``."""
+def parse_invocation(args):
+    """Parse ``enhance`` arguments into ``(quiet, message, prompt, claude_args)``.
+
+    Grammar::
+
+        enhance [-q|--quiet] [-m TEXT|--message TEXT] [PROMPT...] [CLAUDE FLAGS...] [-- CLAUDE ARGS...]
+
+    * Launcher options (``-q``/``--quiet``, ``-m``/``--message``) are recognised ONLY in the
+      leading run -- before any prompt word, claude flag, or ``--``. (So a ``-m`` meant for
+      claude, placed after ``--``, is never mistaken for the launcher's own option.)
+    * The prompt is the ``-m`` value, or otherwise the leading non-dash words.
+    * Everything else -- trailing flags, **and everything after a ``--`` separator** -- is
+      forwarded to ``claude`` verbatim, so you can pass any claude parameter (even one that
+      would otherwise collide with an ``enhance`` option) after ``--``.
+    """
+    args = list(args)
     quiet = False
     message = None
-    remaining = []
+
     i = 0
     while i < len(args):
         a = args[i]
         if a in ("-q", "--quiet"):
             quiet = True
-        elif a in ("-m", "--message") and i + 1 < len(args):
-            message = args[i + 1]
             i += 1
+        elif a in ("-m", "--message"):
+            message = args[i + 1] if i + 1 < len(args) else ""
+            i += 2
         elif a.startswith("--message="):
             message = a.split("=", 1)[1]
+            i += 1
         else:
-            remaining.append(a)
-        i += 1
-    return quiet, message, remaining
+            break
 
+    rest = args[i:]
+    passthrough: list = []
+    if "--" in rest:
+        k = rest.index("--")
+        passthrough = rest[k + 1 :]
+        rest = rest[:k]
 
-def split_args(args):
-    """Separate the leading prompt words from claude flags.
-    Returns ``(claude_flags, prompt_str)`` where ``prompt_str`` may be empty."""
-    if "--" in args:
-        i = args.index("--")
-        return list(args[:i]), " ".join(args[i + 1 :]).strip()
-    prompt_words = []
-    rest = list(args)
-    while rest and not rest[0].startswith("-"):
-        prompt_words.append(rest.pop(0))
-    return rest, " ".join(prompt_words).strip()
+    prompt_words: list = []
+    if message is None:
+        while rest and not rest[0].startswith("-"):
+            prompt_words.append(rest.pop(0))
+
+    prompt = message if message is not None else " ".join(prompt_words).strip()
+    return quiet, message, prompt, rest + passthrough
 
 
 def _resolve_initial_prompt(prompt: str, cfg):
@@ -121,9 +141,9 @@ def _print_prompt(initial: str) -> None:
 def launch(raw_args) -> int:
     cfg = load_config()
     inherit_upstream(cfg)  # forward to a corporate gateway if ANTHROPIC_BASE_URL is one
-    quiet, message, rest = parse_launcher_opts(raw_args)
-    claude_flags, positional_prompt = split_args(rest)
-    prompt = message if message is not None else positional_prompt
+    quiet, _message, prompt, cli_claude_args = parse_invocation(raw_args)
+    # Persistent defaults from config come first; CLI args are appended so they win.
+    claude_flags = [*cfg.claude_args, *cli_claude_args]
 
     skip_texts = set()
     initial = None
@@ -164,6 +184,8 @@ def launch(raw_args) -> int:
     if initial is not None:
         claude_argv.append(initial)
 
+    if claude_flags:
+        sys.stderr.write(f"enhance: forwarding to claude: {' '.join(claude_flags)}\n")
     sys.stderr.write(
         f"enhance: launching Claude Code (follow-up prompts are enhanced via {base}; "
         "exit claude to stop)\n"

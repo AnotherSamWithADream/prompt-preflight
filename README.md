@@ -154,12 +154,27 @@ Choices: `default`, `concise`, `detailed`, `coding`, `research`.
 ## 1. `enhance` — interactive Claude Code (true replacement)
 
 ```bash
-enhance "make my code faster and add tests"   # enhance this prompt, then open claude with it
-enhance                                        # no prompt: open claude, enhance as you type
-enhance "fix the login bug" --model opus       # leading words = prompt; flags pass to claude
-enhance --model opus -- "fix the login bug"    # or put the prompt after `--`
-enhance --serve-only                           # run just the proxy (point your own claude at it)
+enhance "make my code faster and add tests"    # enhance this prompt, then open claude with it
+enhance                                         # no prompt: open claude, enhance as you type
+enhance "fix the login bug" --model opus        # leading words = prompt; trailing flags go to claude
+enhance "fix the bug" -- --model opus --add-dir ./src   # everything after `--` -> claude, verbatim
+enhance --serve-only                            # run just the proxy (point your own claude at it)
 ```
+
+**Passing claude parameters.** Anything that isn't the prompt is forwarded to `claude`. Put
+flags after the prompt, or — to be unambiguous (e.g. for flags that might collide with
+`enhance`'s own options) — put them after a `--` separator, which passes everything after it
+to `claude` verbatim. The launcher prints exactly what it forwards. For **persistent**
+defaults, set `claude_args` (or `PROMPT_ENHANCER_CLAUDE_ARGS="--model,opus"`); CLI flags are
+appended after them, so they win:
+
+```bash
+enhance-cli config set claude_args "--model,opus"       # always launch claude with --model opus
+enhance "review this module" -- --permission-mode plan  # plus per-run flags
+```
+
+(`config set`/the env var take a comma-separated list; for args containing commas, edit the
+config file directly: `"claude_args": ["--model", "opus"]`.)
 
 `enhance "..."` rewrites your prompt with Haiku and starts an **interactive** `claude`
 whose first message is the enhanced prompt. A local proxy runs alongside it, so **the
@@ -311,6 +326,7 @@ enhance                        open claude; the proxy enhances what you type
 enhance -m "prompt" --quiet    enhance a prompt without echoing the rewrite
 enhance --serve-only           run only the proxy
 enhance "fix bug" --model opus pass flags through to claude (prompt = leading words)
+enhance "fix bug" -- ARGS...   pass everything after -- to claude verbatim
 
 # Rewrite to clipboard / scripting
 enhance-cli "prompt"           rewrite → Accept/Edit/Reject → clipboard

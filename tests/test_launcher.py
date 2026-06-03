@@ -52,33 +52,67 @@ def _record(store, key):
     return fn
 
 
-# --- argument splitting ----------------------------------------------------- #
+# --- argument parsing ------------------------------------------------------- #
 
 
-def test_split_args_prompt_only():
-    assert launcher.split_args(["make", "my", "code", "faster"]) == ([], "make my code faster")
+def test_parse_invocation_prompt_only():
+    assert launcher.parse_invocation(["make", "my", "code", "faster"]) == (
+        False,
+        None,
+        "make my code faster",
+        [],
+    )
 
 
-def test_split_args_prompt_then_flags():
-    assert launcher.split_args(["fix the bug", "--model", "opus"]) == (
-        ["--model", "opus"],
+def test_parse_invocation_prompt_then_flags():
+    assert launcher.parse_invocation(["fix the bug", "--model", "opus"]) == (
+        False,
+        None,
         "fix the bug",
-    )
-
-
-def test_split_args_flags_only():
-    assert launcher.split_args(["--model", "opus"]) == (["--model", "opus"], "")
-
-
-def test_split_args_double_dash_separator():
-    assert launcher.split_args(["--model", "opus", "--", "do the thing"]) == (
         ["--model", "opus"],
-        "do the thing",
     )
 
 
-def test_split_args_empty():
-    assert launcher.split_args([]) == ([], "")
+def test_parse_invocation_flags_only():
+    assert launcher.parse_invocation(["--model", "opus"]) == (False, None, "", ["--model", "opus"])
+
+
+def test_parse_invocation_double_dash_passthrough():
+    # Everything after `--` goes to claude verbatim; leading words remain the prompt.
+    assert launcher.parse_invocation(["fix the bug", "--", "--model", "opus", "-c"]) == (
+        False,
+        None,
+        "fix the bug",
+        ["--model", "opus", "-c"],
+    )
+
+
+def test_parse_invocation_message_passthrough_no_steal():
+    # A `-m` AFTER `--` is a claude arg, never mistaken for the launcher's own -m.
+    assert launcher.parse_invocation(["-m", "do it", "--", "-m", "claude-flag"]) == (
+        False,
+        "do it",
+        "do it",
+        ["-m", "claude-flag"],
+    )
+
+
+def test_parse_invocation_launcher_opts_are_leading_only():
+    # A trailing -q is forwarded to claude, not consumed as the launcher's --quiet.
+    assert launcher.parse_invocation(["fix it now", "-q"]) == (False, None, "fix it now", ["-q"])
+
+
+def test_parse_invocation_quiet_and_message():
+    assert launcher.parse_invocation(["-q", "-m", "hi", "--model", "opus"]) == (
+        True,
+        "hi",
+        "hi",
+        ["--model", "opus"],
+    )
+
+
+def test_parse_invocation_empty():
+    assert launcher.parse_invocation([]) == (False, None, "", [])
 
 
 # --- env wiring ------------------------------------------------------------- #
@@ -184,23 +218,36 @@ def test_main_forwards_remaining_args_to_launch(monkeypatch):
     assert captured["args"] == ["fix the bug", "--model", "opus"]
 
 
-def test_parse_launcher_opts():
-    assert launcher.parse_launcher_opts(["-q", "--model", "opus"]) == (
-        True,
-        None,
+def test_parse_invocation_message_equals_form():
+    assert launcher.parse_invocation(["--message=do it", "--model", "opus"]) == (
+        False,
+        "do it",
+        "do it",
         ["--model", "opus"],
     )
-    assert launcher.parse_launcher_opts(["-m", "hi there", "--model", "opus"]) == (
-        False,
-        "hi there",
-        ["--model", "opus"],
-    )
-    assert launcher.parse_launcher_opts(["--message=do it"]) == (False, "do it", [])
-    assert launcher.parse_launcher_opts(["fix", "the", "bug"]) == (
-        False,
-        None,
-        ["fix", "the", "bug"],
-    )
+
+
+def test_launch_prepends_config_claude_args(monkeypatch):
+    from prompt_enhancer.config import Config
+
+    fake = _FakeServer(port=55)
+    store, run = {}, {}
+    cfg = Config()
+    cfg.claude_args = ("--model", "opus")
+    monkeypatch.setattr(launcher, "load_config", lambda: cfg)
+    monkeypatch.setattr(launcher, "make_server", _fake_make_server(fake, store))
+    monkeypatch.setattr(launcher, "resolve_claude_binary", lambda: "claude-bin")
+    monkeypatch.setattr(launcher, "_interactive_capable", lambda: True)
+
+    def _no_enhance(*a, **k):
+        raise AssertionError("no prompt -> enhance must not be called")
+
+    monkeypatch.setattr(launcher, "enhance", _no_enhance)
+    monkeypatch.setattr(launcher.subprocess, "run", _capture_run(run))
+
+    assert launcher.launch(["--", "-c"]) == 0
+    # config defaults come first, CLI passthrough args appended (so CLI wins)
+    assert run["cmd"] == ["claude-bin", "--model", "opus", "-c"]
 
 
 def test_launch_non_tty_adds_print_mode(monkeypatch):
@@ -235,8 +282,7 @@ def test_arg_parsing_never_raises():
         ["-m"],
         ["-q", "-m"],
         ["--message="],
+        ["fix", "--", "-m"],
     ):
-        flags, prompt = launcher.split_args(args)
-        assert isinstance(flags, list) and isinstance(prompt, str)
-        quiet, message, rest = launcher.parse_launcher_opts(args)
-        assert isinstance(rest, list) and isinstance(quiet, bool)
+        quiet, message, prompt, claude_args = launcher.parse_invocation(args)
+        assert isinstance(prompt, str) and isinstance(claude_args, list) and isinstance(quiet, bool)
