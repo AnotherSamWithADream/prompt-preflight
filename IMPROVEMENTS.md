@@ -73,7 +73,7 @@ genuinely deferred ideas is tracked at the bottom.
 
 ## Distribution & release
 
-- [x] 🟠 **Cut the first release** — `v0.2.0` tag + GitHub Release; PyPI via `publish.yml` (OIDC trusted publisher).
+- [x] 🟠 **Cut the first release** — `v0.2.0` tag + GitHub Release shipped; CI green across the matrix. PyPI auto-publish is wired (`publish.yml`, OIDC) and fires on release — it needs a one-time **PyPI trusted-publisher** ("pending publisher") to be configured for `prompt-preflight`, which only the project owner can do.
 - [x] 🟡 **Bump Actions to the Node-24 versions** (`checkout@v5`, `setup-python@v6`, …).
 - [x] 🟡 **Homebrew tap + Scoop manifest** (`packaging/`).
 - [ ] ⚪ **conda-forge recipe** — *(deferred)* `uvx` / `pipx run` one-shot usage is documented; a conda-forge submission is external follow-up.
