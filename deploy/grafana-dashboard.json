@@ -1,0 +1,38 @@
+{
+  "title": "prompt-preflight proxy",
+  "schemaVersion": 39,
+  "editable": true,
+  "tags": ["prompt-preflight"],
+  "panels": [
+    {
+      "title": "Requests vs rewrites",
+      "type": "timeseries",
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 0},
+      "targets": [
+        {"expr": "rate(prompt_preflight_requests[5m])", "legendFormat": "requests/s"},
+        {"expr": "rate(prompt_preflight_rewrites[5m])", "legendFormat": "rewrites/s"}
+      ]
+    },
+    {
+      "title": "Latency (p50 / p95 ms)",
+      "type": "timeseries",
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 0},
+      "targets": [
+        {"expr": "prompt_preflight_p50_ms", "legendFormat": "p50"},
+        {"expr": "prompt_preflight_p95_ms", "legendFormat": "p95"}
+      ]
+    },
+    {
+      "title": "Upstream errors",
+      "type": "stat",
+      "gridPos": {"h": 6, "w": 8, "x": 0, "y": 8},
+      "targets": [{"expr": "prompt_preflight_upstream_errors"}]
+    },
+    {
+      "title": "Uptime (s)",
+      "type": "stat",
+      "gridPos": {"h": 6, "w": 8, "x": 8, "y": 8},
+      "targets": [{"expr": "prompt_preflight_uptime_s"}]
+    }
+  ]
+}

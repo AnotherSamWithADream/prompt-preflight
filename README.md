@@ -16,6 +16,9 @@ one. Run `enhance "make my code faster"` and an interactive Claude session opens
 > "Claude Code" are trademarks of Anthropic. It reuses *your own* Claude auth and adds no
 > telemetry — see [Privacy](#privacy--data-handling).
 
+📖 **Full documentation:** <https://anothersamwithadream.github.io/prompt-preflight/> —
+Quickstart, Backends, Proxy, Deploy, Security, and Architecture.
+
 One core engine, two selectable backends, and **three ways to use it**:
 
 | # | Surface | What the strong model sees | Setup |
@@ -64,7 +67,10 @@ Requires Python 3.9+ and a working `claude` CLI (`claude --version`; Claude Code
 ```bash
 pipx install prompt-preflight        # recommended: isolated CLI install
 # or:  pip install prompt-preflight
-# or, from a clone, for development:
+# one-shot, no install:
+uvx prompt-preflight --help          # via uv
+pipx run prompt-preflight --help     # via pipx
+# from a clone, for development:
 pip install -e .            # commands: enhance, enhance-cli, enhance-hook
 pip install -e ".[api]"     # also installs the `anthropic` SDK for the api backend
 ```

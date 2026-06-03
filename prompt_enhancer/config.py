@@ -29,23 +29,49 @@ from urllib.parse import urlsplit
 class Config:
     # --- behaviour ---------------------------------------------------------
     enabled: bool = True
-    backend: str = "auto"  # "auto" | "cli" | "api"
+    backend: str = "auto"  # "auto" | "cli" | "api" | "openai" | "ollama"
+    profile: str = "default"  # rewrite profile: default | concise | detailed | coding | research
     word_threshold: int = 12  # prompts shorter than this are passed through
     bypass_prefix: str = "//raw"  # skip-enhancement marker
     max_prompt_chars: int = (
         100_000  # skip enhancement above this (cost/context guard); 0 = no limit
     )
 
+    # --- output quality / safety guards ------------------------------------
+    faithfulness_check: bool = (
+        True  # fail open if hard specifics (paths/URLs/quoted code) are dropped
+    )
+    length_ratio_min: float = 0.2  # fail open if rewrite < this fraction of the original
+    length_ratio_max: float = 12.0  # ...or > this multiple (implausible rewrite)
+    clean_output: bool = True  # strip stray fences / "Here is..." / wrapping quotes
+    redact_secrets: bool = True  # skip enhancement (fail open) if the prompt looks like a secret
+    warn_pii: bool = False  # warn on stderr if the prompt looks like it carries PII
+    cache_results: bool = False  # memoize identical prompts within the process
+    circuit_breaker_threshold: int = 5  # consecutive fail-opens before pausing (0 = off)
+    circuit_breaker_cooldown: float = 60.0  # seconds to pause after the breaker trips
+
     # --- CLI backend (claude -p, reuses Claude Code auth, no API key) -------
     model: str = "haiku"  # --model alias/name
     max_turns: int = 1
     timeout: float = 15.0  # seconds before fail-open
+    cli_bare: bool = True  # use `--bare` (faster startup; skips hook/skill/MCP discovery)
+
+    # --- OpenAI / Ollama backends ------------------------------------------
+    openai_model: str = "gpt-4o-mini"
+    openai_key_env: str = "OPENAI_API_KEY"
+    openai_base_url: str = ""  # blank -> SDK default
+    ollama_model: str = "llama3.2"
+    ollama_base_url: str = "http://localhost:11434"
 
     # --- API backend (Anthropic SDK, needs an API key) ---------------------
     api_model: str = "claude-haiku-4-5"
     api_key_env: str = "ANTHROPIC_API_KEY"
     api_max_tokens: int = 2048
     api_retries: int = 1  # retries on transient API errors (429/5xx/overloaded)
+    api_provider: str = "anthropic"  # "anthropic" | "bedrock" | "vertex"
+
+    # --- hook ---------------------------------------------------------------
+    hook_output_style: str = "context"  # "context" (labelled block) | "minimal" (one line)
 
     # --- proxy (true prompt replacement for interactive Claude Code) -------
     upstream_base: str = "https://api.anthropic.com"
@@ -55,6 +81,11 @@ class Config:
     proxy_upstream_timeout: float = 600.0  # stream a (possibly long) response
     proxy_max_body_bytes: int = 16_000_000  # reject oversized request bodies
     proxy_max_concurrency: int = 4  # max simultaneous enhancement calls
+    proxy_dry_run: bool = False  # log the decision but never modify requests (measure traffic)
+    proxy_keep_alive: bool = (
+        False  # reuse upstream connections (opt-in; default closes per request)
+    )
+    otel_enabled: bool = False  # emit OpenTelemetry spans around enhancement (opt-in)
     allow_public_bind: bool = False  # refuse non-loopback proxy_host unless True
     # Text blocks containing this marker are treated as injected context, not the human
     # prompt (Claude Code wraps context in <system-reminder>...</system-reminder>).
@@ -102,16 +133,31 @@ def _coerce(name: str, value, default):
 _ENV_MAP = {
     "PROMPT_ENHANCER_ENABLED": "enabled",
     "PROMPT_ENHANCER_BACKEND": "backend",
+    "PROMPT_ENHANCER_PROFILE": "profile",
     "PROMPT_ENHANCER_WORD_THRESHOLD": "word_threshold",
     "PROMPT_ENHANCER_BYPASS_PREFIX": "bypass_prefix",
     "PROMPT_ENHANCER_MAX_PROMPT_CHARS": "max_prompt_chars",
+    "PROMPT_ENHANCER_FAITHFULNESS_CHECK": "faithfulness_check",
+    "PROMPT_ENHANCER_CLEAN_OUTPUT": "clean_output",
+    "PROMPT_ENHANCER_REDACT_SECRETS": "redact_secrets",
+    "PROMPT_ENHANCER_WARN_PII": "warn_pii",
+    "PROMPT_ENHANCER_CACHE_RESULTS": "cache_results",
+    "PROMPT_ENHANCER_CIRCUIT_BREAKER_THRESHOLD": "circuit_breaker_threshold",
     "PROMPT_ENHANCER_MODEL": "model",
     "PROMPT_ENHANCER_MAX_TURNS": "max_turns",
     "PROMPT_ENHANCER_TIMEOUT": "timeout",
+    "PROMPT_ENHANCER_CLI_BARE": "cli_bare",
+    "PROMPT_ENHANCER_OPENAI_MODEL": "openai_model",
+    "PROMPT_ENHANCER_OPENAI_KEY_ENV": "openai_key_env",
+    "PROMPT_ENHANCER_OPENAI_BASE_URL": "openai_base_url",
+    "PROMPT_ENHANCER_OLLAMA_MODEL": "ollama_model",
+    "PROMPT_ENHANCER_OLLAMA_BASE_URL": "ollama_base_url",
     "PROMPT_ENHANCER_API_MODEL": "api_model",
     "PROMPT_ENHANCER_API_KEY_ENV": "api_key_env",
     "PROMPT_ENHANCER_API_MAX_TOKENS": "api_max_tokens",
     "PROMPT_ENHANCER_API_RETRIES": "api_retries",
+    "PROMPT_ENHANCER_API_PROVIDER": "api_provider",
+    "PROMPT_ENHANCER_HOOK_OUTPUT_STYLE": "hook_output_style",
     "PROMPT_ENHANCER_UPSTREAM_BASE": "upstream_base",
     "PROMPT_ENHANCER_PROXY_HOST": "proxy_host",
     "PROMPT_ENHANCER_PROXY_PORT": "proxy_port",
@@ -119,6 +165,9 @@ _ENV_MAP = {
     "PROMPT_ENHANCER_PROXY_UPSTREAM_TIMEOUT": "proxy_upstream_timeout",
     "PROMPT_ENHANCER_PROXY_MAX_BODY_BYTES": "proxy_max_body_bytes",
     "PROMPT_ENHANCER_PROXY_MAX_CONCURRENCY": "proxy_max_concurrency",
+    "PROMPT_ENHANCER_PROXY_DRY_RUN": "proxy_dry_run",
+    "PROMPT_ENHANCER_PROXY_KEEP_ALIVE": "proxy_keep_alive",
+    "PROMPT_ENHANCER_OTEL": "otel_enabled",
     "PROMPT_ENHANCER_ALLOW_PUBLIC_BIND": "allow_public_bind",
     "PROMPT_ENHANCER_PROXY_REMINDER_MARKER": "proxy_reminder_marker",
     "PROMPT_ENHANCER_PROXY_SKIP_MODELS": "proxy_skip_models",
@@ -126,18 +175,44 @@ _ENV_MAP = {
 }
 
 #: Allowed values for the ``backend`` field.
-_VALID_BACKENDS = ("auto", "cli", "api")
+_VALID_BACKENDS = ("auto", "cli", "api", "openai", "ollama", "heuristic")
+#: Allowed values for the ``profile`` field.
+_VALID_PROFILES = ("default", "concise", "detailed", "coding", "research")
+#: Allowed values for the ``api_provider`` field.
+_VALID_API_PROVIDERS = ("anthropic", "bedrock", "vertex")
+#: Allowed values for the ``hook_output_style`` field.
+_VALID_HOOK_STYLES = ("context", "minimal")
 
 
 class ConfigError(ValueError):
     """Raised for an invalid configuration value."""
 
 
+def _is_plugin_backend(name: str) -> bool:
+    """Whether ``name`` resolves to an installed third-party backend plugin."""
+    try:
+        from prompt_enhancer.engine import find_plugin_backend
+
+        return find_plugin_backend(name) is not None
+    except Exception:  # noqa: BLE001 -- validation must never raise
+        return False
+
+
 def validate(cfg: Config) -> list:
     """Return a list of human-readable problems with ``cfg`` (empty == valid)."""
     problems = []
-    if cfg.backend not in _VALID_BACKENDS:
+    if cfg.backend not in _VALID_BACKENDS and not _is_plugin_backend(cfg.backend):
         problems.append(f"backend must be one of {_VALID_BACKENDS!r}, got {cfg.backend!r}")
+    if cfg.profile not in _VALID_PROFILES:
+        problems.append(f"profile must be one of {_VALID_PROFILES!r}, got {cfg.profile!r}")
+    if cfg.api_provider not in _VALID_API_PROVIDERS:
+        problems.append(
+            f"api_provider must be one of {_VALID_API_PROVIDERS!r}, got {cfg.api_provider!r}"
+        )
+    if cfg.hook_output_style not in _VALID_HOOK_STYLES:
+        problems.append(
+            f"hook_output_style must be one of {_VALID_HOOK_STYLES!r}, got {cfg.hook_output_style!r}"
+        )
     if not (0 < cfg.proxy_port < 65536):
         problems.append(f"proxy_port must be 1-65535, got {cfg.proxy_port}")
     if cfg.word_threshold < 0:

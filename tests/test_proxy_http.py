@@ -147,6 +147,51 @@ def test_make_server_refuses_public_bind():
     server.server_close()
 
 
+def test_version_endpoint():
+    cfg = Config()
+    server, pport = _start_proxy(cfg)
+    try:
+        conn = http.client.HTTPConnection("127.0.0.1", pport, timeout=5)
+        conn.request("GET", "/version")
+        resp = conn.getresponse()
+        assert resp.status == 200 and "version" in json.loads(resp.read())
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_keepalive_relay(monkeypatch):
+    monkeypatch.setattr(
+        proxy, "enhance", lambda text, **k: EnhanceResult("ENHANCED PROMPT", True, text)
+    )
+    up = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _UpstreamHandler)
+    _serve(up)
+    cfg = Config()
+    cfg.upstream_base = f"http://127.0.0.1:{up.server_address[1]}"
+    cfg.proxy_keep_alive = True
+    server, pport = _start_proxy(cfg)
+    try:
+        payload = {"model": OPUS, "tools": TOOLS, "messages": [{"role": "user", "content": LONG}]}
+        conn = http.client.HTTPConnection("127.0.0.1", pport, timeout=10)
+        conn.request(
+            "POST",
+            "/v1/messages",
+            body=json.dumps(payload),
+            headers={"Content-Type": "application/json"},
+        )
+        resp = conn.getresponse()
+        data = resp.read()
+        assert (
+            json.loads(_UpstreamHandler.last_body)["messages"][-1]["content"] == "ENHANCED PROMPT"
+        )
+        assert data == SSE_BODY  # re-framed chunked upstream -> client de-chunks to same body
+    finally:
+        server.shutdown()
+        server.server_close()
+        up.shutdown()
+        up.server_close()
+
+
 def test_banner_mentions_endpoints():
     text = proxy._banner(Config(), "cli")
     assert "/healthz" in text and "ANTHROPIC_BASE_URL" in text

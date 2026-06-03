@@ -140,6 +140,68 @@ def copy_to_clipboard(text: str) -> bool:
         return False
 
 
+def _win_get_clipboard() -> str | None:
+    """Read CF_UNICODETEXT from the Windows clipboard via the Win32 API (Unicode-safe)."""
+    import ctypes
+
+    CF_UNICODETEXT = 13
+    windll = ctypes.windll  # type: ignore[attr-defined]  # Windows-only API
+    u32 = windll.user32
+    k32 = windll.kernel32
+    k32.GlobalLock.restype = ctypes.c_void_p
+    k32.GlobalLock.argtypes = [ctypes.c_void_p]
+    k32.GlobalUnlock.argtypes = [ctypes.c_void_p]
+    u32.GetClipboardData.restype = ctypes.c_void_p
+    u32.GetClipboardData.argtypes = [ctypes.c_uint]
+    if not u32.IsClipboardFormatAvailable(CF_UNICODETEXT):
+        return None
+    if not u32.OpenClipboard(None):
+        return None
+    try:
+        handle = u32.GetClipboardData(CF_UNICODETEXT)
+        if not handle:
+            return None
+        ptr = k32.GlobalLock(handle)
+        if not ptr:
+            return None
+        try:
+            return ctypes.c_wchar_p(ptr).value
+        finally:
+            k32.GlobalUnlock(handle)
+    finally:
+        u32.CloseClipboard()
+
+
+def _read_clipboard() -> str | None:
+    """Return the system clipboard text, or None if unreadable."""
+    if sys.platform.startswith("win"):
+        try:
+            return _win_get_clipboard()
+        except Exception:  # noqa: BLE001 -- fall back to a CLI tool below
+            pass
+    if sys.platform == "darwin":
+        cmd: list[str] | None = ["pbpaste"]
+    elif sys.platform.startswith("win"):
+        cmd = ["powershell", "-NoProfile", "-Command", "Get-Clipboard"]
+    else:
+        cmd = None
+        for candidate in (
+            ["wl-paste"],
+            ["xclip", "-selection", "clipboard", "-o"],
+            ["xsel", "--clipboard", "--output"],
+        ):
+            if which(candidate[0]):
+                cmd = candidate
+                break
+    if not cmd:
+        return None
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8")
+    except OSError:
+        return None
+    return proc.stdout if proc.returncode == 0 else None
+
+
 # --------------------------------------------------------------------------- #
 # Change summary                                                               #
 # --------------------------------------------------------------------------- #
@@ -277,6 +339,127 @@ def _choose(enhanced: str) -> str | None:
         sys.stderr.write("Please enter A, E, or R.\n")
 
 
+def _extract_open_questions(text: str) -> list[str]:
+    """Pull the bullet items out of a trailing "Open questions" section, if any."""
+    questions: list[str] = []
+    seen = False
+    for line in text.splitlines():
+        if not seen:
+            if "open questions" in line.lower():
+                seen = True
+            continue
+        stripped = line.strip()
+        if stripped.startswith(("-", "*", "•")):
+            questions.append(stripped.lstrip("-*• ").strip())
+        elif not stripped and questions:
+            break  # blank line ends the section
+    return questions
+
+
+def _maybe_clarify(raw: str, enhanced: str, cfg) -> tuple[str, str]:
+    """If the rewrite raised open questions, offer to answer them and refine in one pass.
+
+    Returns the (possibly updated) ``(raw, enhanced)`` pair. No-op without a terminal.
+    """
+    questions = _extract_open_questions(enhanced)
+    if not questions:
+        return raw, enhanced
+    sys.stderr.write(f"\nThis rewrite raised {len(questions)} open question(s):\n")
+    for i, q in enumerate(questions, 1):
+        sys.stderr.write(f"  {i}. {q}\n")
+    line = _prompt_line("Answer them to refine the prompt? [y/N] ")
+    if not line or line.strip().lower() not in ("y", "yes"):
+        return raw, enhanced
+
+    answers: list[str] = []
+    for i, q in enumerate(questions, 1):
+        ans = _prompt_line(f"  {i}. {q}\n     > ")
+        if ans is None:
+            break
+        ans = ans.strip()
+        if ans:
+            answers.append(f"- {q} {ans}")
+    if not answers:
+        return raw, enhanced
+
+    refined_raw = raw.rstrip() + "\n\nAdditional context:\n" + "\n".join(answers)
+    result = enhance(refined_raw, config=cfg)
+    if result.enhanced:
+        sys.stderr.write("\n----- Refined prompt -----\n")
+        sys.stderr.write(result.text + "\n")
+        return refined_raw, result.text
+    return raw, enhanced
+
+
+# --------------------------------------------------------------------------- #
+# REPL + clipboard watch                                                       #
+# --------------------------------------------------------------------------- #
+
+
+def repl(cfg) -> int:
+    """Interactive read-enhance-print loop. One line per prompt; EOF or ``:q`` exits."""
+    sys.stderr.write(
+        "enhance-cli REPL -- type a prompt and press Enter; the rewrite prints below.\n"
+        "Exit with Ctrl-D (Ctrl-Z on Windows) or ':q'.\n"
+    )
+    while True:
+        line = _prompt_line("\nprompt> ")
+        if line is None or line == "":  # EOF / no terminal
+            break
+        text = line.strip()
+        if not text:
+            continue
+        if text in (":q", ":quit"):
+            break
+        result = enhance(text, config=cfg)
+        if not result.enhanced:
+            sys.stderr.write(f"(skipped: {result.error or 'unavailable'})\n")
+        sys.stdout.write(result.text + "\n")
+        sys.stdout.flush()
+    sys.stderr.write("bye\n")
+    return 0
+
+
+def watch(cfg) -> int:
+    """Poll the clipboard; rewrite new prompt-like text in place until interrupted."""
+    import time
+
+    if _read_clipboard() is None:
+        sys.stderr.write("enhance-cli: no clipboard reader available on this system.\n")
+        return 1
+    try:
+        interval = float(os.environ.get("PROMPT_ENHANCER_WATCH_INTERVAL", "1.0"))
+    except ValueError:
+        interval = 1.0
+    interval = max(0.3, interval)
+    sys.stderr.write(
+        f"enhance-cli watch -- rewriting new clipboard text every {interval:g}s. Ctrl-C to stop.\n"
+    )
+    last = _read_clipboard()
+    count = 0
+    try:
+        while True:
+            time.sleep(interval)
+            current = _read_clipboard()
+            if current is None or current == last:
+                continue
+            last = current
+            stripped, is_raw = strip_raw_prefix(current, cfg.bypass_prefix)
+            if is_raw or not current.strip() or len(current.split()) < cfg.word_threshold:
+                continue
+            result = enhance(current, config=cfg)
+            if result.enhanced and result.text != current and copy_to_clipboard(result.text):
+                # Re-read so our own write doesn't look like new input next tick.
+                last = _read_clipboard() or result.text
+                count += 1
+                sys.stderr.write(
+                    f"[{count}] enhanced {len(current)}->{len(result.text)} chars (on clipboard)\n"
+                )
+    except KeyboardInterrupt:
+        sys.stderr.write("\nstopped.\n")
+    return 0
+
+
 # --------------------------------------------------------------------------- #
 # Top level                                                                    #
 # --------------------------------------------------------------------------- #
@@ -314,6 +497,8 @@ def _emit_json(original: str, text: str, result) -> int:
         obj["backend"] = result.backend
         obj["elapsed"] = round(result.elapsed, 3)
         obj["error"] = result.error
+        obj["cost_usd"] = result.cost_usd
+        obj["usage"] = result.usage
     json.dump(obj, sys.stdout, ensure_ascii=False)
     sys.stdout.write("\n")
     return 0
@@ -339,10 +524,48 @@ def run(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--json", action="store_true", help="Emit a JSON result and exit (no prompt, no clipboard)."
     )
+    parser.add_argument(
+        "-f", "--file", help="Read the prompt from a file instead of arguments/stdin."
+    )
+    parser.add_argument(
+        "--profile",
+        choices=("default", "concise", "detailed", "coding", "research"),
+        help="Rewrite profile (overrides config).",
+    )
+    parser.add_argument(
+        "--explain",
+        action="store_true",
+        help="Print why the prompt was or wasn't enhanced (backend, error, timing).",
+    )
+    parser.add_argument(
+        "--repl",
+        action="store_true",
+        help="Interactive loop: type a prompt, get the rewrite, repeat (Ctrl-D/Ctrl-Z to exit).",
+    )
+    parser.add_argument(
+        "--watch",
+        action="store_true",
+        help="Watch the clipboard and rewrite new text in place (Ctrl-C to stop).",
+    )
     args = parser.parse_args(argv)
     cfg = load_config()
+    if args.profile:
+        cfg.profile = args.profile
 
-    raw = _read_input(args)
+    if args.repl:
+        return repl(cfg)
+    if args.watch:
+        return watch(cfg)
+
+    if args.file:
+        try:
+            with open(args.file, encoding="utf-8") as fh:
+                raw = fh.read()
+        except OSError as exc:
+            sys.stderr.write(f"enhance-cli: cannot read {args.file}: {exc}\n")
+            return 2
+    else:
+        raw = _read_input(args)
     if not raw or not raw.strip():
         sys.stderr.write("enhance-cli: no input provided.\n")
         return 2
@@ -357,6 +580,14 @@ def run(argv: list[str] | None = None) -> int:
         return 0
 
     result = enhance(raw, config=cfg)
+    if args.explain:
+        sys.stderr.write(
+            f"enhance-cli: backend={result.backend} enhanced={result.enhanced} "
+            f"error={result.error} elapsed={round(result.elapsed, 2)}s "
+            f"profile={cfg.profile}"
+            + (f" cost=${result.cost_usd}" if result.cost_usd else "")
+            + "\n"
+        )
     if args.json:
         return _emit_json(raw, result.text, result)
     if not result.enhanced:
@@ -378,6 +609,7 @@ def run(argv: list[str] | None = None) -> int:
     if args.yes:
         final = enhanced
     else:
+        raw, enhanced = _maybe_clarify(raw, enhanced, cfg)
         final = _choose(enhanced)
 
     if final is None:
@@ -403,6 +635,8 @@ def config_main(argv) -> int:
         return 0
     if cmd == "set":
         return _config_set(argv[1:])
+    if cmd in ("unset", "reset"):
+        return _config_unset(argv[1:], reset=cmd == "reset")
     if cmd == "path":
         sys.stdout.write(config_path() + "\n")
         return 0
@@ -430,8 +664,38 @@ def config_main(argv) -> int:
             return 1
         return 0
 
-    sys.stderr.write("usage: enhance-cli config [show|path|init|edit|set <key> <value>]\n")
+    sys.stderr.write(
+        "usage: enhance-cli config [show|path|init|edit|set <key> <value>|unset <key>|reset]\n"
+    )
     return 2
+
+
+def _config_unset(args, *, reset: bool) -> int:
+    target = config_path()
+    if not os.path.isfile(target):
+        sys.stderr.write(f"no config file at {target}\n")
+        return 0
+    if reset:
+        os.remove(target)
+        sys.stderr.write(f"reset (deleted) {target}\n")
+        return 0
+    if not args:
+        sys.stderr.write("usage: enhance-cli config unset <key>\n")
+        return 2
+    try:
+        with open(target, encoding="utf-8") as fh:
+            data = json.load(fh)
+    except (OSError, ValueError):
+        data = {}
+    if not isinstance(data, dict) or args[0] not in data:
+        sys.stderr.write(f"{args[0]} is not set in {target}\n")
+        return 0
+    del data[args[0]]
+    with open(target, "w", encoding="utf-8") as fh:
+        json.dump(data, fh, indent=2)
+        fh.write("\n")
+    sys.stderr.write(f"unset {args[0]} in {target}\n")
+    return 0
 
 
 def _config_env_map() -> dict:
@@ -551,6 +815,58 @@ def doctor_main(argv) -> int:
     return 0 if ok else 1
 
 
+def init_main(argv) -> int:
+    """`enhance-cli init` -- register the UserPromptSubmit hook in ~/.claude/settings.json."""
+    settings = os.path.join(os.path.expanduser("~"), ".claude", "settings.json")
+    if argv and argv[0]:
+        settings = argv[0]
+    data: dict = {}
+    if os.path.isfile(settings):
+        try:
+            with open(settings, encoding="utf-8") as fh:
+                data = json.load(fh)
+        except (OSError, ValueError):
+            sys.stderr.write(f"enhance-cli: cannot parse {settings}; not modifying it.\n")
+            return 1
+        # Back up before editing.
+        try:
+            with open(settings + ".bak", "w", encoding="utf-8") as fh:
+                json.dump(data, fh, indent=2)
+        except OSError:
+            pass
+    hooks = data.setdefault("hooks", {})
+    ups = hooks.setdefault("UserPromptSubmit", [])
+    already = any("enhance-hook" in json.dumps(group) for group in ups if isinstance(group, dict))
+    if already:
+        sys.stderr.write("enhance-hook is already registered.\n")
+        return 0
+    ups.append({"hooks": [{"type": "command", "command": "enhance-hook", "timeout": 20}]})
+    os.makedirs(os.path.dirname(os.path.abspath(settings)), exist_ok=True)
+    with open(settings, "w", encoding="utf-8") as fh:
+        json.dump(data, fh, indent=2)
+        fh.write("\n")
+    sys.stderr.write(f"registered enhance-hook in {settings} (backup at {settings}.bak)\n")
+    return 0
+
+
+def stats_main(argv) -> int:
+    """`enhance-cli stats` -- pretty-print a running proxy's /stats."""
+    import urllib.request
+
+    cfg = load_config()
+    host = cfg.proxy_host if cfg.proxy_host not in ("0.0.0.0",) else "127.0.0.1"
+    url = f"http://{host}:{cfg.proxy_port}/stats"
+    try:
+        with urllib.request.urlopen(url, timeout=3) as resp:  # noqa: S310 -- local
+            data = json.loads(resp.read())
+    except Exception as exc:  # noqa: BLE001
+        sys.stderr.write(f"enhance-cli: no proxy reachable at {url} ({type(exc).__name__})\n")
+        return 1
+    for k, v in data.items():
+        sys.stdout.write(f"{k:16} {v}\n")
+    return 0
+
+
 def main() -> int:
     argv = sys.argv[1:]
     if "--version" in argv or "-V" in argv:
@@ -558,10 +874,14 @@ def main() -> int:
 
         sys.stdout.write(f"prompt-preflight (enhance-cli) {__version__}\n")
         return 0
-    if argv and argv[0] == "config":
-        return config_main(argv[1:])
-    if argv and argv[0] == "doctor":
-        return doctor_main(argv[1:])
+    dispatch = {
+        "config": config_main,
+        "doctor": doctor_main,
+        "init": init_main,
+        "stats": stats_main,
+    }
+    if argv and argv[0] in dispatch:
+        return dispatch[argv[0]](argv[1:])
     try:
         return run()
     except KeyboardInterrupt:

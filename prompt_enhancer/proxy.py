@@ -7,13 +7,14 @@ request (background/title calls, tool-loop turns, non-message endpoints) streams
 untouched.
 
 The response is relayed **raw** (we only change the request body), so streaming/SSE
-framing is preserved byte-for-byte; we force ``Connection: close`` upstream so one
-response == one socket lifetime and there is no response framing to parse. (We cache the
-TLS context to keep per-request setup cheap; full upstream keep-alive is intentionally
-avoided because it would complicate streaming correctness for little gain on a local,
-low-rate proxy.)
+framing is preserved byte-for-byte. By default we force ``Connection: close`` upstream so
+one response == one socket lifetime and there is no response framing to parse (we cache
+the TLS context to keep per-request setup cheap). Setting ``proxy_keep_alive`` opts into a
+per-thread pooled upstream connection that re-frames responses as it relays them -- a
+little faster, at the cost of the connection-reframing code path.
 
-Also serves ``GET /healthz``, ``/readyz``, and ``/stats`` for monitoring.
+Also serves ``GET /healthz``, ``/readyz``, ``/version``, ``/stats``, and ``/metrics``
+(Prometheus) for monitoring.
 
 Usually you don't run this directly -- plain ``enhance`` starts it and launches claude
 for you. ``enhance --serve-only`` (or ``python -m prompt_enhancer.proxy``) runs just the
@@ -23,7 +24,10 @@ server.
 from __future__ import annotations
 
 import argparse
+import contextlib
+import http.client
 import json
+import logging
 import os
 import signal
 import socket
@@ -31,6 +35,7 @@ import ssl
 import sys
 import threading
 import time
+from collections import deque
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlsplit
 
@@ -52,12 +57,46 @@ _HOP_BY_HOP = {
 # Built once: constructing an SSLContext loads the CA bundle and is not free.
 _SSL_CONTEXT = ssl.create_default_context()
 
+# Per-thread pooled upstream connection, used only when proxy_keep_alive is enabled.
+_thread_conn = threading.local()
+
+
+def _new_upstream_conn(up, cfg: Config):
+    host = up.hostname
+    port = up.port or (443 if up.scheme == "https" else 80)
+    if up.scheme == "https":
+        return http.client.HTTPSConnection(
+            host, port, timeout=cfg.proxy_upstream_timeout, context=_SSL_CONTEXT
+        )
+    return http.client.HTTPConnection(host, port, timeout=cfg.proxy_upstream_timeout)
+
+
+#: Structural logger -- emits metadata only, never prompt text (see :func:`_setup_logging`).
+logger = logging.getLogger("prompt_preflight.proxy")
+
+
+def _setup_logging(level: str | None) -> None:
+    """Configure stdlib logging for the proxy. ``level`` is a name like ``info``/``debug``;
+    falsy or unrecognised values leave logging at its (silent) default."""
+    if not level:
+        return
+    lvl = getattr(logging, str(level).upper(), None)
+    if not isinstance(lvl, int):
+        return
+    handler = logging.StreamHandler(sys.stderr)
+    handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s %(message)s"))
+    logger.handlers[:] = [handler]
+    logger.setLevel(lvl)
+    logger.propagate = False
+
 
 def _debug(msg: str) -> None:
-    """Structural diagnostics (never prompt text). Enabled with PROMPT_ENHANCER_PROXY_DEBUG=1."""
+    """Structural diagnostics (never prompt text). Enabled with PROMPT_ENHANCER_PROXY_DEBUG=1
+    or by raising the log level to DEBUG via ``--log-level debug``."""
     if os.environ.get("PROMPT_ENHANCER_PROXY_DEBUG"):
         sys.stderr.write(f"[proxy-debug] {msg}\n")
         sys.stderr.flush()
+    logger.debug(msg)
 
 
 def _shape(content) -> str:
@@ -108,6 +147,44 @@ def _extract_user_prompt(message: dict, marker: str = "<system-reminder"):
 
 def _dump(payload: dict) -> bytes:
     return json.dumps(payload, ensure_ascii=False).encode("utf-8")
+
+
+# OpenTelemetry is optional: the cache holds [] until first use, then [tracer|None].
+_otel_tracer: list = []
+
+
+def _get_tracer(cfg: Config):
+    """Return an OTel tracer if tracing is opted-in and the SDK is importable, else None."""
+    if not (cfg.otel_enabled or os.environ.get("PROMPT_ENHANCER_OTEL")):
+        return None
+    if _otel_tracer:
+        return _otel_tracer[0]
+    tracer = None
+    try:
+        from opentelemetry import trace
+
+        tracer = trace.get_tracer("prompt_preflight.proxy")
+    except Exception:  # noqa: BLE001 -- tracing must never break the proxy
+        tracer = None
+    _otel_tracer.append(tracer)
+    return tracer
+
+
+@contextlib.contextmanager
+def _otel_span(name: str, cfg: Config, attrs: dict | None = None):
+    """A span context manager that is a no-op unless tracing is enabled. Attributes are
+    metadata only (model, char counts) -- prompt text is never recorded."""
+    tracer = _get_tracer(cfg)
+    if tracer is None:
+        yield None
+        return
+    with tracer.start_as_current_span(name) as span:
+        try:
+            for key, value in (attrs or {}).items():
+                span.set_attribute(key, value)
+        except Exception:  # noqa: BLE001
+            pass
+        yield span
 
 
 def rewrite_request_body(raw: bytes, cfg: Config, skip_texts=None, semaphore=None):
@@ -174,11 +251,18 @@ def rewrite_request_body(raw: bytes, cfg: Config, skip_texts=None, semaphore=Non
         _debug("rewrite: //raw bypass (stripped token)")
         return _dump(payload), True
 
-    if semaphore is not None:
-        with semaphore:
+    if cfg.proxy_dry_run:
+        _debug(
+            f"dry-run: WOULD enhance (model={model!r}, {len(text)} chars) -- forwarding unchanged"
+        )
+        return raw, False
+
+    with _otel_span("prompt_preflight.enhance", cfg, {"model": model, "input_chars": len(text)}):
+        if semaphore is not None:
+            with semaphore:
+                result = enhance(decision.text, config=cfg)
+        else:
             result = enhance(decision.text, config=cfg)
-    else:
-        result = enhance(decision.text, config=cfg)
     if not result.enhanced:
         _debug(f"skip: engine fail-open ({result.error})")
         return raw, False
@@ -201,20 +285,20 @@ def _is_messages_path(path: str) -> bool:
 class _Stats:
     def __init__(self):
         self._lock = threading.Lock()
+        self._start = time.monotonic()
+        self._latency: deque = deque(maxlen=512)  # recent request ms (bounded)
         self.requests = 0
         self.rewrites = 0
         self.fail_opens = 0
         self.upstream_errors = 0
 
-    def record(self, *, rewrote: bool):
+    def record(self, *, rewrote: bool, ms: float | None = None):
         with self._lock:
             self.requests += 1
             if rewrote:
                 self.rewrites += 1
-
-    def note_fail_open(self):
-        with self._lock:
-            self.fail_opens += 1
+            if ms is not None:
+                self._latency.append(ms)
 
     def note_upstream_error(self):
         with self._lock:
@@ -222,16 +306,28 @@ class _Stats:
 
     def snapshot(self) -> dict:
         with self._lock:
+            lat = sorted(self._latency)
             return {
                 "requests": self.requests,
                 "rewrites": self.rewrites,
                 "fail_opens": self.fail_opens,
                 "upstream_errors": self.upstream_errors,
+                "uptime_s": round(time.monotonic() - self._start, 1),
+                "p50_ms": _percentile(lat, 50),
+                "p95_ms": _percentile(lat, 95),
             }
+
+
+def _percentile(sorted_vals, pct: int):
+    if not sorted_vals:
+        return 0
+    k = max(0, min(len(sorted_vals) - 1, int(round((pct / 100) * (len(sorted_vals) - 1)))))
+    return round(sorted_vals[k])
 
 
 def _access_log(record: dict) -> None:
     """Opt-in, local-only access log (metadata only -- never prompt text)."""
+    logger.info("access %s", json.dumps(record))
     path = os.environ.get("PROMPT_ENHANCER_PROXY_ACCESS_LOG")
     if not path:
         return
@@ -270,10 +366,14 @@ class _Handler(BaseHTTPRequestHandler):
         if self.command == "GET" and path == "/metrics":
             snap = self._stats.snapshot() if self._stats else {}
             body = "".join(
-                f"# TYPE prompt_preflight_{k} counter\nprompt_preflight_{k} {v}\n"
+                f"# TYPE prompt_preflight_{k} gauge\nprompt_preflight_{k} {v}\n"
                 for k, v in snap.items()
             )
             return self._respond_text(200, body)
+        if self.command == "GET" and path == "/version":
+            from prompt_enhancer import __version__
+
+            return self._respond_json(200, {"version": __version__})
 
         if "chunked" in self.headers.get("Transfer-Encoding", "").lower():
             return self._safe_error(411, "chunked request bodies are not supported")
@@ -294,23 +394,26 @@ class _Handler(BaseHTTPRequestHandler):
                 )
             except Exception:  # noqa: BLE001 -- never let rewriting break the request
                 pass
-        if self._stats:
-            self._stats.record(rewrote=did)
 
         try:
             self._forward(body)
+            ms = (time.monotonic() - t0) * 1000
+            if self._stats:
+                self._stats.record(rewrote=did, ms=ms)
             _access_log(
                 {
                     "method": self.command,
                     "path": path,
                     "rewrote": did,
-                    "ms": round((time.monotonic() - t0) * 1000),
+                    "ms": round(ms),
+                    "request_id": self.headers.get("x-request-id"),
                 }
             )
         except (ConnectionResetError, BrokenPipeError):
             self.close_connection = True
         except OSError as exc:
             if self._stats:
+                self._stats.record(rewrote=did)
                 self._stats.note_upstream_error()
             self._safe_error(502, f"upstream error: {type(exc).__name__}: {exc}")
 
@@ -321,7 +424,25 @@ class _Handler(BaseHTTPRequestHandler):
     do_DELETE = _relay
     do_OPTIONS = _relay
 
+    def _fwd_headers(self):
+        """Headers to forward upstream (drop hop-by-hop/Host/Content-Length and any with CR/LF)."""
+        out = {}
+        for key, value in self.headers.items():
+            low = key.lower()
+            if low in _HOP_BY_HOP or low in ("host", "content-length"):
+                continue
+            if any(c in key or c in str(value) for c in ("\r", "\n")):
+                continue  # defend against header / request smuggling
+            out[key] = value
+        return out
+
     def _forward(self, body: bytes):
+        if self._cfg.proxy_keep_alive:
+            return self._forward_keepalive(body)
+        return self._forward_close(body)
+
+    def _forward_close(self, body: bytes):
+        """Raw relay: one response per socket (Connection: close), framing preserved verbatim."""
         up = urlsplit(self._cfg.upstream_base)
         host = up.hostname
         port = up.port or (443 if up.scheme == "https" else 80)
@@ -331,14 +452,7 @@ class _Handler(BaseHTTPRequestHandler):
 
         try:
             lines = [f"{self.command} {self.path} HTTP/1.1"]
-            for key, value in self.headers.items():
-                low = key.lower()
-                if low in _HOP_BY_HOP or low in ("host", "content-length"):
-                    continue
-                # Defend against header / request smuggling: never forward a header whose
-                # name or value carries CR/LF.
-                if any(c in key or c in str(value) for c in ("\r", "\n")):
-                    continue
+            for key, value in self._fwd_headers().items():
                 lines.append(f"{key}: {value}")
             lines.append(f"Host: {host}")
             lines.append(f"Content-Length: {len(body)}")
@@ -358,6 +472,48 @@ class _Handler(BaseHTTPRequestHandler):
                 sock.close()
             except OSError:
                 pass
+
+    def _forward_keepalive(self, body: bytes):
+        """Pooled upstream connection (reused per thread). Re-frames the response as chunked."""
+        up = urlsplit(self._cfg.upstream_base)
+        key = (up.scheme, up.hostname, up.port)
+        conn = getattr(_thread_conn, "conn", None)
+        if conn is None or getattr(_thread_conn, "key", None) != key:
+            conn = _new_upstream_conn(up, self._cfg)
+            _thread_conn.conn, _thread_conn.key = conn, key
+        headers = self._fwd_headers()
+        headers["Host"] = up.hostname
+        try:
+            conn.request(self.command, self.path, body=body, headers=headers)
+            resp = conn.getresponse()
+        except (http.client.HTTPException, OSError):
+            try:
+                conn.close()
+            except OSError:
+                pass
+            conn = _new_upstream_conn(up, self._cfg)
+            _thread_conn.conn = conn
+            conn.request(self.command, self.path, body=body, headers=headers)
+            resp = conn.getresponse()
+
+        self.send_response_only(resp.status, resp.reason or "")
+        for k, v in resp.getheaders():
+            if k.lower() in ("connection", "keep-alive", "transfer-encoding", "content-length"):
+                continue
+            self.send_header(k, v)
+        self.send_header("Transfer-Encoding", "chunked")
+        self.end_headers()
+        while True:
+            chunk = resp.read(65536)
+            self._write_chunk(chunk)
+            if not chunk:
+                break  # terminator written
+
+    def _write_chunk(self, data: bytes):
+        self.wfile.write(f"{len(data):X}\r\n".encode("ascii"))
+        self.wfile.write(data)
+        self.wfile.write(b"\r\n")
+        self.wfile.flush()
 
     def _respond_json(self, code: int, obj: dict):
         payload = json.dumps(obj).encode("utf-8")
@@ -463,8 +619,14 @@ def main(argv=None) -> int:
     parser.add_argument("--host", default=cfg.proxy_host)
     parser.add_argument("--port", type=int, default=cfg.proxy_port)
     parser.add_argument("--upstream", default=None)
+    parser.add_argument(
+        "--log-level",
+        default=os.environ.get("PROMPT_ENHANCER_LOG_LEVEL"),
+        help="Structural logging level (debug/info/warning); metadata only, never prompt text.",
+    )
     args = parser.parse_args(argv)
 
+    _setup_logging(args.log_level)
     cfg.proxy_host, cfg.proxy_port = args.host, args.port
     if args.upstream:
         cfg.upstream_base = args.upstream

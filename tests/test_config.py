@@ -93,6 +93,19 @@ def test_validate_catches_bad_values():
     assert validate(Config()) == []  # defaults are valid
 
 
+def test_validate_new_enums():
+    cfg = Config()
+    cfg.api_provider = "nope"
+    cfg.hook_output_style = "loud"
+    problems = validate(cfg)
+    assert any("api_provider" in p for p in problems)
+    assert any("hook_output_style" in p for p in problems)
+    # heuristic is a first-class backend now
+    ok = Config()
+    ok.backend = "heuristic"
+    assert validate(ok) == []
+
+
 def test_is_local_proxy_any_loopback_port():
     cfg = Config()  # proxy_port 8788
     # Non-default port still recognized as a local proxy (the hook fix #51)

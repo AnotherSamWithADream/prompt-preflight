@@ -1,0 +1,55 @@
+site_name: prompt-preflight
+site_description: Rewrite rough prompts into clearer ones with Claude Haiku before a stronger model sees them.
+site_url: https://anothersamwithadream.github.io/prompt-preflight/
+repo_url: https://github.com/AnotherSamWithADream/prompt-preflight
+repo_name: prompt-preflight
+edit_uri: edit/main/docs/
+
+theme:
+  name: material
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: deep purple
+      accent: deep purple
+      toggle:
+        icon: material/weather-night
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: deep purple
+      accent: deep purple
+      toggle:
+        icon: material/weather-sunny
+        name: Switch to light mode
+  features:
+    - navigation.sections
+    - navigation.top
+    - content.code.copy
+    - toc.integrate
+
+nav:
+  - Home: index.md
+  - Quickstart: quickstart.md
+  - Backends: backends.md
+  - Proxy: proxy.md
+  - Deploy: deploy.md
+  - Security & privacy: security.md
+  - Architecture: architecture.md
+
+markdown_extensions:
+  - admonition
+  - toc:
+      permalink: true
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
+
+extra:
+  social:
+    - icon: fontawesome/brands/github
+      link: https://github.com/AnotherSamWithADream/prompt-preflight

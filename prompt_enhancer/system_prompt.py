@@ -59,3 +59,32 @@ Open questions:
 - What language and framework is it written in?
 - Are there specific bottlenecks or performance targets?
 - What kinds of tests are wanted (unit, integration), and with which framework?"""
+
+
+#: Optional per-profile directives appended to the base prompt. They tune *style* only --
+#: faithfulness still wins.
+_PROFILE_SUFFIXES = {
+    "default": "",
+    "concise": (
+        "\n\nPROFILE (concise): Prefer the shortest faithful rewrite. Do not add structure, "
+        "bullet points, or expansion beyond what is needed for clarity."
+    ),
+    "detailed": (
+        "\n\nPROFILE (detailed): Organize the request into clear, explicit steps or short "
+        "bullet points where that helps -- without inventing requirements or scope."
+    ),
+    "coding": (
+        "\n\nPROFILE (coding): Assume a software-engineering task. Preserve code, identifiers, "
+        "file paths, and error text exactly. Make the target language/framework explicit only "
+        "if the user clearly implied it."
+    ),
+    "research": (
+        "\n\nPROFILE (research): Frame the request as a precise research/analysis question, "
+        "making scope and desired output explicit only where the user implied them."
+    ),
+}
+
+
+def system_prompt_for(profile: str = "default") -> str:
+    """Return the enhancer system prompt for ``profile`` (falls back to the default)."""
+    return ENHANCER_SYSTEM_PROMPT + _PROFILE_SUFFIXES.get(profile, "")

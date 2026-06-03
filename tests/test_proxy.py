@@ -159,6 +159,20 @@ def test_rewrite_failopen_keeps_body(monkeypatch):
     assert not did  # engine failed open -> request forwarded unchanged
 
 
+def test_dry_run_forwards_unchanged(monkeypatch):
+    monkeypatch.setattr(proxy, "enhance", _no_enhance)
+    cfg = Config()
+    cfg.proxy_dry_run = True
+    new, did = proxy.rewrite_request_body(_body(_main_call(LONG)), cfg)
+    assert not did
+
+
+def test_count_tokens_is_not_a_messages_call():
+    assert proxy._is_messages_path("/v1/messages")
+    assert proxy._is_messages_path("/v1/messages?beta=true")
+    assert not proxy._is_messages_path("/v1/messages/count_tokens")
+
+
 def test_rewrite_fuzz_never_raises():
     samples = [
         b"",
@@ -178,3 +192,86 @@ def test_rewrite_fuzz_never_raises():
     for s in samples:
         out, did = proxy.rewrite_request_body(s, Config())
         assert isinstance(out, bytes) and isinstance(did, bool)
+
+
+# --- logging + OpenTelemetry (opt-in observability) ------------------------ #
+
+
+def test_setup_logging_sets_level():
+    proxy._setup_logging("debug")
+    assert proxy.logger.level == 10  # logging.DEBUG
+    proxy.logger.handlers[:] = []  # leave the global logger clean for other tests
+
+
+def test_otel_disabled_by_default_is_noop():
+    # With tracing off (default config, env unset by conftest) the span yields None and
+    # _get_tracer never even imports the SDK.
+    proxy._otel_tracer[:] = []
+    assert proxy._get_tracer(Config()) is None
+    with proxy._otel_span("x", Config()) as span:
+        assert span is None
+
+
+def test_otel_enabled_records_span(monkeypatch):
+    spans = []
+
+    class _Span:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def set_attribute(self, k, v):
+            spans.append((k, v))
+
+    class _Tracer:
+        def start_as_current_span(self, name):
+            spans.append(("span", name))
+            return _Span()
+
+    proxy._otel_tracer[:] = []
+    monkeypatch.setattr(proxy, "_get_tracer", lambda cfg: _Tracer())
+    monkeypatch.setattr(proxy, "enhance", lambda text, **k: EnhanceResult("ENHANCED", True, text))
+    cfg = Config()
+    cfg.otel_enabled = True
+    new, did = proxy.rewrite_request_body(_body(_main_call(LONG)), cfg)
+    assert did
+    assert ("span", "prompt_preflight.enhance") in spans
+    assert any(k == "model" for k, _ in spans)
+    proxy._otel_tracer[:] = []
+
+
+def test_concurrent_rewrites_are_safe(monkeypatch):
+    """#41: hammer the rewrite path from many threads through a shared semaphore and
+    assert every call returns a correct, independent result with no crashes."""
+    import threading
+
+    monkeypatch.setattr(proxy, "enhance", lambda text, **k: EnhanceResult(text.upper(), True, text))
+    sema = threading.Semaphore(8)
+    results: list = []
+    errors: list = []
+    lock = threading.Lock()
+
+    def worker(i):
+        try:
+            prompt = f"{LONG} number {i} please and thanks a lot for the help"
+            new, did = proxy.rewrite_request_body(
+                _body(_main_call(prompt)), Config(), semaphore=sema
+            )
+            content = json.loads(new)["messages"][-1]["content"]
+            with lock:
+                results.append((did, content == prompt.upper()))
+        except Exception as exc:  # noqa: BLE001
+            with lock:
+                errors.append(exc)
+
+    threads = [threading.Thread(target=worker, args=(i,)) for i in range(50)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert not errors
+    assert len(results) == 50
+    assert all(did and matched for did, matched in results)

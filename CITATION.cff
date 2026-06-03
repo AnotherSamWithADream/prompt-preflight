@@ -1,0 +1,18 @@
+cff-version: 1.2.0
+message: "If you use prompt-preflight, please cite it."
+title: prompt-preflight
+abstract: >-
+  A prompt pre-flight tool that rewrites rough, vague prompts into clearer, better-structured
+  ones with Claude Haiku before they reach a stronger model, via a Claude Code proxy, hook, or CLI.
+authors:
+  - family-names: Mohnot
+    given-names: Samit
+type: software
+license: MIT
+repository-code: "https://github.com/AnotherSamWithADream/prompt-preflight"
+keywords:
+  - claude
+  - anthropic
+  - prompt-engineering
+  - llm
+  - cli

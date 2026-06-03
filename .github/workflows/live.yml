@@ -4,6 +4,8 @@ name: live-tests
 # Requires a repo secret ANTHROPIC_API_KEY. Trigger manually from the Actions tab.
 on:
   workflow_dispatch:
+  schedule:
+    - cron: "0 6 * * 1"  # weekly (Mon 06:00 UTC) -- catch Claude Code CLI / model drift
 
 permissions:
   contents: read
@@ -14,8 +16,8 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
           cache: pip

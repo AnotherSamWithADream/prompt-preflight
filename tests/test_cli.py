@@ -246,3 +246,182 @@ def test_clipboard_unavailable_returns_false(monkeypatch):
     monkeypatch.setattr(cli.sys, "platform", "linux")
     monkeypatch.setattr(cli, "_clipboard_command", lambda: None)
     assert cli.copy_to_clipboard("x") is False
+
+
+# --- new flags + subcommands ----------------------------------------------- #
+
+ENH = "Improve and clarify this rough prompt for a stronger model right now please."
+
+
+def test_profile_flag_applied(monkeypatch, capsys):
+    captured = {}
+    monkeypatch.setattr(
+        cli,
+        "enhance",
+        lambda raw, config=None, **k: (
+            captured.update(profile=config.profile) or EnhanceResult(ENH, True, raw)
+        ),
+    )
+    cli.run(["--json", "--profile", "coding", "make", "this", "much", "clearer", "now", "please"])
+    assert captured["profile"] == "coding"
+
+
+def test_read_from_file(monkeypatch, tmp_path):
+    p = tmp_path / "prompt.txt"
+    p.write_text("please make this much clearer for the strong model now thanks")
+    monkeypatch.setattr(cli, "enhance", lambda raw, **k: EnhanceResult(ENH, True, raw))
+    box = _capture_clipboard(monkeypatch)
+    assert cli.run(["-y", "-f", str(p)]) == 0
+    assert box["text"] == ENH
+
+
+def test_explain_prints_trace(monkeypatch, capsys):
+    monkeypatch.setattr(
+        cli, "enhance", lambda raw, **k: EnhanceResult(ENH, True, raw, backend="cli")
+    )
+    cli.run(["-y", "--explain", "make", "this", "much", "clearer", "now", "please", "thanks"])
+    assert "backend=cli" in capsys.readouterr().err
+
+
+def test_json_includes_cost(monkeypatch, capsys):
+    monkeypatch.setattr(
+        cli,
+        "enhance",
+        lambda raw, **k: EnhanceResult(
+            ENH, True, raw, backend="cli", cost_usd=0.01, usage={"input_tokens": 5}
+        ),
+    )
+    cli.run(["--json", "make", "this", "much", "clearer", "now", "please", "thanks"])
+    out = json.loads(capsys.readouterr().out)
+    assert out["cost_usd"] == 0.01 and out["usage"] == {"input_tokens": 5}
+
+
+def test_config_unset(monkeypatch, tmp_path):
+    cfgfile = tmp_path / "c.json"
+    cfgfile.write_text(json.dumps({"backend": "api", "word_threshold": 5}))
+    monkeypatch.setenv("PROMPT_ENHANCER_CONFIG", str(cfgfile))
+    assert cli.config_main(["unset", "backend"]) == 0
+    data = json.loads(cfgfile.read_text())
+    assert "backend" not in data and data["word_threshold"] == 5
+
+
+def test_config_reset(monkeypatch, tmp_path):
+    cfgfile = tmp_path / "c.json"
+    cfgfile.write_text("{}")
+    monkeypatch.setenv("PROMPT_ENHANCER_CONFIG", str(cfgfile))
+    assert cli.config_main(["reset"]) == 0
+    assert not cfgfile.exists()
+
+
+def test_init_registers_hook(tmp_path):
+    settings = tmp_path / "settings.json"
+    assert cli.init_main([str(settings)]) == 0
+    data = json.loads(settings.read_text())
+    assert "enhance-hook" in json.dumps(data["hooks"]["UserPromptSubmit"])
+    assert cli.init_main([str(settings)]) == 0  # idempotent
+
+
+def test_stats_reads_proxy(monkeypatch, capsys):
+    import urllib.request
+
+    class _R:
+        def read(self):
+            return json.dumps({"requests": 3, "rewrites": 1}).encode()
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    monkeypatch.setattr(urllib.request, "urlopen", lambda url, timeout=None: _R())
+    assert cli.stats_main([]) == 0
+    assert "requests" in capsys.readouterr().out
+
+
+# --- REPL / watch / clarify ------------------------------------------------ #
+
+
+def test_extract_open_questions():
+    text = "Do the thing.\n\nOpen questions:\n- Which file?\n- Which language?\n\nEnd."
+    assert cli._extract_open_questions(text) == ["Which file?", "Which language?"]
+    assert cli._extract_open_questions("no questions here") == []
+
+
+def test_repl_enhances_each_line(monkeypatch, capsys):
+    lines = iter(["make this much clearer please now", ":q"])
+    monkeypatch.setattr(cli, "_prompt_line", lambda msg: next(lines, ""))
+    monkeypatch.setattr(cli, "enhance", lambda text, **k: EnhanceResult("REPL-OUT", True, text))
+    assert cli.repl(cli.load_config()) == 0
+    assert "REPL-OUT" in capsys.readouterr().out
+
+
+def test_clarify_refines_with_answers(monkeypatch, capsys):
+    enhanced = "Build it.\n\nOpen questions:\n- Which framework?"
+    answers = iter(["y", "React"])
+    monkeypatch.setattr(cli, "_prompt_line", lambda msg: next(answers, ""))
+    seen = {}
+
+    def fake_enhance(raw, **k):
+        seen["raw"] = raw
+        return EnhanceResult("REFINED", True, raw)
+
+    monkeypatch.setattr(cli, "enhance", fake_enhance)
+    raw2, enhanced2 = cli._maybe_clarify("build an app", enhanced, cli.load_config())
+    assert enhanced2 == "REFINED"
+    assert "Additional context:" in raw2 and "React" in raw2
+
+
+def test_clarify_noop_without_questions():
+    raw, enhanced = cli._maybe_clarify("orig", "no open questions in this rewrite", None)
+    assert (raw, enhanced) == ("orig", "no open questions in this rewrite")
+
+
+def test_watch_requires_clipboard_reader(monkeypatch):
+    monkeypatch.setattr(cli, "_read_clipboard", lambda: None)
+    assert cli.watch(cli.load_config()) == 1
+
+
+def test_read_clipboard_darwin(monkeypatch):
+    monkeypatch.setattr(cli.sys, "platform", "darwin")
+
+    def fake_run(cmd, **kw):
+        assert cmd == ["pbpaste"]
+        return subprocess.CompletedProcess(cmd, 0, stdout="clip text")
+
+    monkeypatch.setattr(cli.subprocess, "run", fake_run)
+    assert cli._read_clipboard() == "clip text"
+
+
+def test_watch_enhances_changed_clipboard(monkeypatch):
+    import time
+
+    new_prompt = "please make this prompt much clearer and better for the strong model now thanks"
+    # availability check, initial last, the new prompt, then our own echoed write.
+    reads = iter(["x", "x", new_prompt, new_prompt.upper()])
+
+    def fake_read():
+        try:
+            return next(reads)
+        except StopIteration as exc:  # next loop tick: stop cleanly
+            raise KeyboardInterrupt from exc
+
+    monkeypatch.setattr(cli, "_read_clipboard", fake_read)
+    monkeypatch.setattr(cli, "enhance", lambda text, **k: EnhanceResult(text.upper(), True, text))
+    monkeypatch.setattr(time, "sleep", lambda s: None)
+    box = {}
+    monkeypatch.setattr(cli, "copy_to_clipboard", lambda t: box.update(text=t) or True)
+    assert cli.watch(cli.load_config()) == 0
+    assert box.get("text") == new_prompt.upper()  # enhanced text written back to clipboard
+
+
+def test_run_dispatches_repl(monkeypatch):
+    called = {}
+
+    def fake_repl(cfg):
+        called["repl"] = True
+        return 0
+
+    monkeypatch.setattr(cli, "repl", fake_repl)
+    assert cli.run(["--repl"]) == 0
+    assert called.get("repl")

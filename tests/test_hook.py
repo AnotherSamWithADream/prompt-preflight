@@ -155,3 +155,16 @@ def test_decide_is_pure():
     # The exact word-count boundary: 11 words skipped, 12 enhanced.
     eleven = " ".join(["word"] * 11)
     assert hook.decide(eleven) is None
+
+
+def test_minimal_output_style(monkeypatch):
+    from prompt_enhancer.config import Config
+
+    cfg = Config()
+    cfg.hook_output_style = "minimal"
+    monkeypatch.setattr(hook, "enhance", lambda *a, **k: EnhanceResult("CLARIFIED", True, "orig"))
+    ctx = hook.decide(" ".join(["word"] * 12), cfg)
+    assert ctx is not None
+    assert "CLARIFIED" in ctx
+    assert "begin clarified restatement" not in ctx  # the verbose block is suppressed
+    assert ctx.count("\n") == 0  # single line

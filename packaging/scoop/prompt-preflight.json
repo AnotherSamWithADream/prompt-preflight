@@ -1,0 +1,21 @@
+{
+  "version": "0.2.0",
+  "description": "Rewrite rough prompts into clearer ones with Claude Haiku before a stronger model",
+  "homepage": "https://github.com/AnotherSamWithADream/prompt-preflight",
+  "license": "MIT",
+  "depends": "python",
+  "installer": {
+    "script": [
+      "python -m pip install --user --upgrade \"prompt-preflight==$version\""
+    ]
+  },
+  "uninstaller": {
+    "script": [
+      "python -m pip uninstall -y prompt-preflight"
+    ]
+  },
+  "checkver": "pypi",
+  "autoupdate": {
+    "url": "https://pypi.org/project/prompt-preflight/"
+  }
+}

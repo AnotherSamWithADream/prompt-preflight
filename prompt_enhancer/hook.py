@@ -37,6 +37,18 @@ def format_clarified_restatement(enhanced: str) -> str:
     )
 
 
+def format_minimal(enhanced: str) -> str:
+    """A terse single-line framing for users who find the full block too verbose."""
+    return f"[prompt pre-flight] Clarified intent (original above wins on conflict): {enhanced}"
+
+
+def format_context(enhanced: str, style: str) -> str:
+    """Render ``enhanced`` per ``hook_output_style`` (``context`` | ``minimal``)."""
+    return (
+        format_minimal(enhanced) if style == "minimal" else format_clarified_restatement(enhanced)
+    )
+
+
 def decide(prompt: str, cfg=None):
     """Pure decision logic. Returns the ``additionalContext`` string to emit, or
     ``None`` to pass the prompt through unchanged."""
@@ -49,7 +61,7 @@ def decide(prompt: str, cfg=None):
     result = enhance(prompt, config=cfg)
     if not result.enhanced:
         return None  # fail open
-    return format_clarified_restatement(result.text)
+    return format_context(result.text, cfg.hook_output_style)
 
 
 def _emit_context(context: str) -> None:

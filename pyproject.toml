@@ -32,6 +32,7 @@ classifiers = [
 
 [project.optional-dependencies]
 api = ["anthropic>=0.40"]
+docs = ["mkdocs-material>=9.5"]
 dev = [
     "pytest>=7",
     "pytest-cov>=4",
@@ -74,6 +75,7 @@ omit = ["prompt_enhancer/__main__.py"]
 
 [tool.coverage.report]
 show_missing = true
+fail_under = 75
 exclude_lines = [
     "pragma: no cover",
     "if __name__ == .__main__.:",
