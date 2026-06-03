@@ -43,8 +43,12 @@ def test_clean_output():
 def test_plausible_length():
     assert safety.plausible_length("a" * 100, "b" * 100, 0.2, 12.0)
     assert not safety.plausible_length("a" * 100, "b" * 5, 0.2, 12.0)  # too short
-    assert not safety.plausible_length("a" * 10, "b" * 200, 0.2, 12.0)  # runaway
+    assert not safety.plausible_length("a" * 100, "b" * 2000, 0.2, 12.0)  # runaway (> 12x, > floor)
     assert safety.plausible_length("", "anything", 0.2, 12.0)  # empty original -> ok
+    # A very short prompt may expand past 12x up to the absolute floor (clarification)...
+    assert safety.plausible_length("fix my code", "b" * 500, 0.2, 12.0)  # 500 < 600 floor
+    # ...but not into a runaway essay.
+    assert not safety.plausible_length("fix my code", "b" * 5000, 0.2, 12.0)
 
 
 def test_path_token_ignores_prose_slashes():

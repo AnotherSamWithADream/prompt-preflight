@@ -120,11 +120,20 @@ def clean_output(text: str) -> str:
     return t
 
 
+# A clarified rewrite of a *very short*, vague prompt is legitimately many times longer
+# than the input (e.g. a 3-word prompt gains an "Open questions" section). So the upper
+# bound is max(hi*len, this floor): only an expansion that ALSO exceeds this absolute size
+# counts as a runaway. Without it, the length guard fails open on short prompts -- the very
+# ones that benefit most from enhancement.
+_LEN_FLOOR_CHARS = 600
+
+
 def plausible_length(original: str, rewrite: str, lo: float, hi: float) -> bool:
-    """True if the rewrite's length is within [lo, hi] x the original (guards against a
-    model that returned almost nothing or a runaway expansion)."""
+    """True if the rewrite's length is plausible: at least ``lo``x the original, and no more
+    than ``max(hi*len(original), 600)`` (so short prompts may expand freely up to the floor).
+    Guards against a model that returned almost nothing or ran away into an essay."""
     o = len(original.strip())
     if o == 0:
         return True
-    ratio = len(rewrite.strip()) / o
-    return lo <= ratio <= hi
+    r = len(rewrite.strip())
+    return lo * o <= r <= max(hi * o, _LEN_FLOOR_CHARS)

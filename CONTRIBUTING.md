@@ -20,12 +20,18 @@ ruff format --check .     # formatting
 mypy prompt_enhancer      # type check
 ```
 
-Optional live tests (spend a small amount of Haiku usage and require `claude` on PATH):
+Live tests (spend a small amount of Haiku usage and require `claude` on PATH). The mocked
+suite cannot catch flags/timeouts/lengths that break against the *real* binary, so these
+exercise real `claude` for the engine **and the proxy end-to-end**:
 
 ```bash
 # Windows: set PROMPT_ENHANCER_LIVE_TESTS=1   |   POSIX: export PROMPT_ENHANCER_LIVE_TESTS=1
 pytest -m live
 ```
+
+> **Releasing:** `pytest -m live` is a **required** pre-release step — CI cannot run it (no
+> `claude` auth on the runners), so a green mocked suite alone is not sufficient to cut a
+> release. Run it (ideally against a clean config) before tagging.
 
 ## Guidelines
 

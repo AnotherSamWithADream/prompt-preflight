@@ -53,7 +53,7 @@ class Config:
     # --- CLI backend (claude -p, reuses Claude Code auth, no API key) -------
     model: str = "haiku"  # --model alias/name
     max_turns: int = 1
-    timeout: float = 15.0  # seconds before fail-open
+    timeout: float = 30.0  # seconds before fail-open (the cli backend launches a process)
     # `--bare` skips hook/skill/MCP discovery (faster startup) but on some Claude Code
     # versions it also bypasses the interactive login, so `claude -p` reports "Not logged
     # in". Off by default; the engine retries without it if an enabled --bare call fails.

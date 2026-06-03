@@ -6,6 +6,21 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+## [0.2.2] - 2026-06-03
+
+### Fixed
+- **`cli` backend timed out too early.** The default `timeout` is raised 15s → 30s: a cold
+  `claude -p` process legitimately takes longer than 15s, so enhancement silently fell open
+  to the original. Found by actually running the (previously never-run) live tests.
+- **Length guard rejected good rewrites of very short prompts.** The upper bound is now
+  `max(length_ratio_max * len(original), 600 chars)`, so a clarified rewrite of a tiny vague
+  prompt (which legitimately grows past 12×) is no longer flagged as a runaway.
+
+### Added
+- A live end-to-end test that drives **real `claude` through the proxy** and asserts the
+  enhanced, faithful prompt reaches upstream — closing the proxy's live-coverage gap. The
+  live suite (`pytest -m live`) is now part of the pre-release checklist.
+
 ## [0.2.1] - 2026-06-03
 
 ### Fixed
