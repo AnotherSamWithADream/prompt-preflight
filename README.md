@@ -1,17 +1,10 @@
 # prompt-preflight
 
 [![build](https://github.com/AnotherSamWithADream/prompt-preflight/actions/workflows/build.yml/badge.svg)](https://github.com/AnotherSamWithADream/prompt-preflight/actions/workflows/build.yml)
-[![Python](https://img.shields.io/badge/python-3.9%2B-blue.svg)](https://pypi.org/project/prompt-preflight/)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![Docs](https://img.shields.io/badge/docs-mkdocs-blue.svg)](https://anothersamwithadream.github.io/prompt-preflight/)
-<!-- Re-enable once published to PyPI (these pull live data and show "not found" until then):
 [![PyPI](https://img.shields.io/pypi/v/prompt-preflight.svg)](https://pypi.org/project/prompt-preflight/)
 [![Python](https://img.shields.io/pypi/pyversions/prompt-preflight.svg)](https://pypi.org/project/prompt-preflight/)
--->
-
-> ⚠️ Not yet published to PyPI. Until then, install from source (`pip install -e .` from a
-> clone); `pip install prompt-preflight` / `uvx` / `pipx` start working the moment the first
-> release lands on PyPI.
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Docs](https://img.shields.io/badge/docs-mkdocs-blue.svg)](https://anothersamwithadream.github.io/prompt-preflight/)
 
 **Type a rough prompt; your strong model sees a clear one.**
 
