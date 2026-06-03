@@ -1,0 +1,23 @@
+# Install: copy to /etc/systemd/system/ (system) or ~/.config/systemd/user/ (user),
+# then: systemctl --user daemon-reload && systemctl --user enable --now prompt-preflight-proxy
+[Unit]
+Description=prompt-preflight enhancing proxy
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/enhance --serve-only
+Restart=on-failure
+RestartSec=5
+# Backend + secrets. Prefer an EnvironmentFile with 0600 perms over inline secrets.
+Environment=PROMPT_ENHANCER_BACKEND=auto
+EnvironmentFile=-/etc/prompt-preflight/proxy.env
+# Hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+PrivateTmp=true
+
+[Install]
+WantedBy=default.target

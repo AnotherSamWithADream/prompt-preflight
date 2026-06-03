@@ -1,0 +1,112 @@
+name: build
+
+on:
+  push:
+    branches: [main, master]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+# NOTE: actions are pinned to major-version tags; Dependabot (.github/dependabot.yml)
+# proposes commit-SHA pins and keeps them current.
+jobs:
+  lint:
+    name: lint + types
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: python -m pip install -e ".[dev]"
+      - run: ruff check .
+      - run: ruff format --check .
+      - run: mypy prompt_enhancer
+
+  # prompt-preflight is pure Python, so `python -m build` produces a single universal
+  # wheel (prompt_preflight-<ver>-py3-none-any.whl) that works on every OS and Python
+  # 3.9+. The matrix below exists because the code has OS-specific paths (Windows shim,
+  # clipboard, sockets) and must stay 3.9-compatible.
+  build:
+    name: build wheel + sdist
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: |
+          python -m pip install --upgrade pip build twine
+          python -m build
+          twine check dist/*
+          ls -l dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/*
+          if-no-files-found: error
+
+  test:
+    name: test ${{ matrix.os }} · py${{ matrix.python-version }}
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        python-version: ["3.9", "3.10", "3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+      - run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[dev]"
+      - run: pytest -q --cov --cov-report=term-missing --cov-fail-under=70
+        # Live tests stay skipped here (no `claude`, no key, so nothing hits the network).
+
+  wheel-smoke:
+    name: wheel ${{ matrix.os }} · py${{ matrix.python-version }}
+    needs: build
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        python-version: ["3.9", "3.13"]
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist
+      # Core has no runtime deps, so it installs offline from the artifact. (The [api]
+      # extra needs `anthropic` from PyPI, which --no-index can't fetch.)
+      - run: python -m pip install --no-index --find-links dist prompt-preflight
+      - name: Smoke check (import + console scripts)
+        shell: bash
+        run: |
+          python -c "import prompt_enhancer; print('version', prompt_enhancer.__version__)"
+          python -c "import shutil; missing=[c for c in ('enhance','enhance-cli','enhance-hook') if not shutil.which(c)]; assert not missing, missing; print('console scripts present')"
+          enhance-cli --version
+          enhance-cli --help
