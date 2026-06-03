@@ -1,0 +1,102 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "prompt-preflight"
+dynamic = ["version"]
+description = "Prompt pre-flight: rewrite rough prompts into clearer ones with Claude Haiku before they reach a stronger model."
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+authors = [{ name = "Samit Mohnot" }]
+keywords = ["claude", "anthropic", "prompt", "llm", "cli", "proxy", "claude-code", "prompt-engineering"]
+dependencies = []
+
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development :: Quality Assurance",
+    "Topic :: Utilities",
+    "Typing :: Typed",
+]
+
+[project.optional-dependencies]
+api = ["anthropic>=0.40"]
+dev = [
+    "pytest>=7",
+    "pytest-cov>=4",
+    "anthropic>=0.40",
+    "ruff>=0.6",
+    "mypy>=1.8",
+    "build>=1.2",
+]
+
+[project.urls]
+Homepage = "https://github.com/AnotherSamWithADream/prompt-preflight"
+Repository = "https://github.com/AnotherSamWithADream/prompt-preflight"
+Issues = "https://github.com/AnotherSamWithADream/prompt-preflight/issues"
+Changelog = "https://github.com/AnotherSamWithADream/prompt-preflight/blob/main/CHANGELOG.md"
+
+[project.scripts]
+enhance = "prompt_enhancer.launcher:main"       # start proxy + launch claude through it
+enhance-cli = "prompt_enhancer.cli:main"        # rewrite a prompt to the clipboard
+enhance-hook = "prompt_enhancer.hook:main"      # UserPromptSubmit hook (fallback)
+
+[tool.setuptools]
+packages = ["prompt_enhancer"]
+
+[tool.setuptools.dynamic]
+version = { attr = "prompt_enhancer.__version__" }
+
+[tool.setuptools.package-data]
+prompt_enhancer = ["py.typed"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+markers = [
+    "live: test that calls the real `claude` binary (skipped unless PROMPT_ENHANCER_LIVE_TESTS=1)",
+]
+
+[tool.coverage.run]
+source = ["prompt_enhancer"]
+omit = ["prompt_enhancer/__main__.py"]
+
+[tool.coverage.report]
+show_missing = true
+exclude_lines = [
+    "pragma: no cover",
+    "if __name__ == .__main__.:",
+    "raise NotImplementedError",
+    "if TYPE_CHECKING:",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py39"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "C4"]
+ignore = ["E501"]  # long lines (e.g. the system prompt) are intentional
+
+[tool.mypy]
+# The codebase targets 3.9 (via `from __future__ import annotations`); mypy itself
+# requires >= 3.10 for its analysis version.
+python_version = "3.10"
+ignore_missing_imports = true
+warn_unused_configs = true
+
+# Optional mutation testing to gauge test strength: `pip install mutmut && mutmut run`.
+[tool.mutmut]
+paths_to_mutate = "prompt_enhancer/"
+runner = "python -m pytest -q -x"

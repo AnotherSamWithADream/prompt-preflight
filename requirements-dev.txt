@@ -1,0 +1,4 @@
+# Reproducible development install.
+#   pip install -r requirements-dev.txt
+# For a fully-pinned lock, run:  uv pip compile pyproject.toml --extra dev -o requirements-dev.lock
+-e .[dev]
