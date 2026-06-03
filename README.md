@@ -359,8 +359,10 @@ Use one path at a time.
 
 **"It's slow."**
 The `cli` backend adds ~5 s (it launches `claude`). The `api` backend is ~1–3 s — set
-`PROMPT_ENHANCER_BACKEND=api` with an `ANTHROPIC_API_KEY`. The `cli` backend already uses
-`--bare` to skip hook/skill/MCP discovery.
+`PROMPT_ENHANCER_BACKEND=api` with an `ANTHROPIC_API_KEY`. You can also try `cli_bare`
+(`--bare`) to skip hook/skill/MCP discovery — it's **off by default** because on some Claude
+Code versions it bypasses the interactive login; if you enable it and a call fails, the
+engine automatically retries without it.
 
 **"I want to skip enhancement for one prompt."**
 Prefix it with `//raw` (or use a `/slash-command`, which is always skipped).

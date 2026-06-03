@@ -16,8 +16,10 @@ The engine is backend-abstracted. Set `backend` in config or
 
 Uses your existing Claude Code login — no separate API key. The prompt is passed on
 **stdin** (never argv), so it can't leak into process listings and there's no shell
-involved. `cli_bare` (default on) adds `--bare` to skip hook/skill/MCP/memory discovery:
-faster, and a second layer of recursion defense.
+involved. `cli_bare` (**off by default**) adds `--bare` to skip hook/skill/MCP/memory
+discovery for a faster start — but on some Claude Code versions `--bare` bypasses the
+interactive login (`claude` reports "Not logged in"), so it's opt-in; if an enabled
+`--bare` call fails, the engine automatically retries without it.
 
 ## API backend
 

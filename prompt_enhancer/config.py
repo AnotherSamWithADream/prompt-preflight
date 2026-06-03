@@ -54,7 +54,10 @@ class Config:
     model: str = "haiku"  # --model alias/name
     max_turns: int = 1
     timeout: float = 15.0  # seconds before fail-open
-    cli_bare: bool = True  # use `--bare` (faster startup; skips hook/skill/MCP discovery)
+    # `--bare` skips hook/skill/MCP discovery (faster startup) but on some Claude Code
+    # versions it also bypasses the interactive login, so `claude -p` reports "Not logged
+    # in". Off by default; the engine retries without it if an enabled --bare call fails.
+    cli_bare: bool = False
 
     # Extra arguments always passed to the `claude` launched by `enhance`, e.g.
     # ("--model", "opus"). CLI args given to `enhance` are appended after these (so they win).

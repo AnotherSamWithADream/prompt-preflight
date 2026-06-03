@@ -26,4 +26,4 @@ __all__ = [
     "load_config",
     "classify_prompt",
 ]
-__version__ = "0.2.0"
+__version__ = "0.2.1"

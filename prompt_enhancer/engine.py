@@ -422,15 +422,15 @@ def _run_cli(
     if points_at_proxy(child_env.get("ANTHROPIC_BASE_URL"), cfg):
         child_env.pop("ANTHROPIC_BASE_URL", None)
 
-    cmd = build_command(
-        model=model,
-        max_turns=max_turns,
-        binary=resolve_claude_binary(),
-        system=system_prompt_for(cfg.profile),
-        bare=cfg.cli_bare,
-    )
-    try:
-        proc = subprocess.run(
+    def _invoke(bare: bool):
+        cmd = build_command(
+            model=model,
+            max_turns=max_turns,
+            binary=resolve_claude_binary(),
+            system=system_prompt_for(cfg.profile),
+            bare=bare,
+        )
+        return subprocess.run(
             cmd,
             input=raw_prompt,  # prompt via stdin: off the command line, injection-proof
             capture_output=True,
@@ -440,6 +440,13 @@ def _run_cli(
             timeout=timeout,
             env=child_env,
         )
+
+    try:
+        proc = _invoke(cfg.cli_bare)
+        if proc.returncode != 0 and cfg.cli_bare:
+            # `--bare` can bypass the interactive login on some Claude Code versions
+            # (claude reports "Not logged in"); retry once without it before giving up.
+            proc = _invoke(False)
     except subprocess.TimeoutExpired:
         return _fail_open(raw_prompt, "timeout", start, "cli")
     except (OSError, ValueError) as exc:

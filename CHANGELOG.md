@@ -6,6 +6,23 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-06-03
+
+### Fixed
+- **`cli` backend "Not logged in" failure.** `cli_bare` (the `--bare` flag) is now **off by
+  default**: on current Claude Code versions `--bare` bypasses the interactive login, so the
+  default subscription-auth path failed with `exit-1`. The engine now also auto-retries
+  without `--bare` if an enabled `--bare` call fails.
+
+### Changed
+- `enhance`: a `--` separator now passes everything after it to `claude` verbatim (use
+  `-m`/`--message` for a prompt that starts with a dash); new `claude_args` config field /
+  `PROMPT_ENHANCER_CLAUDE_ARGS` for persistent claude parameters.
+- Proxy: removed the opt-in keep-alive forwarder (it buffered reads, breaking SSE streaming,
+  and could resubmit a non-idempotent POST); the raw `Connection: close` relay is the only
+  path. Tightened the faithfulness token/preamble heuristics to stop rejecting good rewrites
+  of ordinary prose; the heuristic backend no longer alters a leading URL/path/code token.
+
 ## [0.2.0] - 2026-06-03
 
 ### Added

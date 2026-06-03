@@ -398,6 +398,30 @@ def test_cli_bare_flag_in_command():
     assert "--bare" not in build_command(bare=False)
 
 
+def test_cli_bare_default_is_off():
+    # `--bare` bypasses the interactive login on some Claude Code versions, so it must be
+    # opt-in -- the default cli backend command must NOT carry it.
+    assert Config().cli_bare is False
+
+
+def test_cli_bare_failure_retries_without_bare(monkeypatch):
+    calls = []
+
+    def fake_run(cmd, **kw):
+        calls.append(cmd)
+        if "--bare" in cmd:  # simulate the "Not logged in" exit-1 from a --bare call
+            return _completed("nope", returncode=1)
+        return _completed(PLAUSIBLE)
+
+    monkeypatch.setattr(engine.subprocess, "run", fake_run)
+    cfg = Config()
+    cfg.cli_bare = True
+    r = enhance(LONG, backend="cli", config=cfg)
+    assert r.enhanced and r.text == PLAUSIBLE
+    assert len(calls) == 2
+    assert any("--bare" in c for c in calls) and any("--bare" not in c for c in calls)
+
+
 def test_cache_results_memoizes(monkeypatch):
     calls = {"n": 0}
     monkeypatch.setattr(
