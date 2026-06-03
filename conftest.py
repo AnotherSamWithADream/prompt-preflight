@@ -30,4 +30,9 @@ def _clean_env(monkeypatch, tmp_path):
     from prompt_enhancer import engine
 
     engine.reset_caches()
+
+    # Deterministic baseline: the suite mocks the `claude` invocation, so treat a binary
+    # as present regardless of the runner (CI has none). Tests covering the no-claude
+    # path explicitly override this back to False.
+    monkeypatch.setattr(engine, "_claude_available", lambda: True)
     yield
