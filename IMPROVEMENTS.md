@@ -33,7 +33,7 @@ genuinely deferred ideas is tracked at the bottom.
 ## Performance
 
 - [x] 🟠 **`--bare` mode for the cli backend** — skips hook/skill/MCP/memory discovery: faster *and* a second layer of recursion defense.
-- [x] 🟡 **Real upstream keep-alive/pooling** in the proxy — opt-in via `proxy_keep_alive`.
+- [ ] 🟡 **Real upstream keep-alive/pooling** in the proxy — *(evaluated and dropped)* an `http.client`-based pooled path buffers reads (breaking incremental SSE) and risks resubmitting non-idempotent POSTs, so the verified raw `Connection: close` relay is the only forwarder. A streaming-safe raw-socket pool is possible future work.
 - [x] 🟠 **Surface token usage & cost** — exposed in `EnhanceResult`, `--json`, and `/stats`.
 - [ ] ⚪ **Async engine + async proxy** — *(partial)* `aenhance()` async API shipped; the proxy stays threaded (fine for localhost concurrency). A full asyncio rewrite is deferred to avoid risking the verified raw relay.
 

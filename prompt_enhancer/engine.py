@@ -101,6 +101,7 @@ def reset_caches() -> None:
     _api_client_cache.clear()
     _result_cache.clear()
     _plugin_cache.clear()
+    system_prompt_for.cache_clear()
     _breaker["failures"] = 0
     _breaker["open_until"] = 0.0
 
@@ -310,9 +311,9 @@ def enhance(
             raw_prompt, cfg, model=api_model or cfg.api_model, timeout=eff_timeout, start=start
         )
     elif chosen == "openai":
-        result = _run_openai(raw_prompt, cfg, start=start)
+        result = _run_openai(raw_prompt, cfg, timeout=eff_timeout, start=start)
     elif chosen == "ollama":
-        result = _run_ollama(raw_prompt, cfg, start=start)
+        result = _run_ollama(raw_prompt, cfg, timeout=eff_timeout, start=start)
     elif chosen == "heuristic":
         result = _run_heuristic(raw_prompt, cfg, start=start)
     elif chosen == "cli":
@@ -556,7 +557,7 @@ def _run_api(
     return _fail_open(raw_prompt, last_error, start, "api")
 
 
-def _run_openai(raw_prompt: str, cfg: Config, *, start: float) -> EnhanceResult:
+def _run_openai(raw_prompt: str, cfg: Config, *, timeout: float, start: float) -> EnhanceResult:
     try:
         import openai
     except ImportError:
@@ -572,7 +573,7 @@ def _run_openai(raw_prompt: str, cfg: Config, *, start: float) -> EnhanceResult:
         resp = client.chat.completions.create(
             model=cfg.openai_model,
             max_tokens=cfg.api_max_tokens,
-            timeout=cfg.timeout,
+            timeout=timeout,
             messages=[
                 {"role": "system", "content": system_prompt_for(cfg.profile)},
                 {"role": "user", "content": raw_prompt},
@@ -588,7 +589,7 @@ def _run_openai(raw_prompt: str, cfg: Config, *, start: float) -> EnhanceResult:
     return EnhanceResult(text, True, raw_prompt, elapsed=elapsed, backend="openai")
 
 
-def _run_ollama(raw_prompt: str, cfg: Config, *, start: float) -> EnhanceResult:
+def _run_ollama(raw_prompt: str, cfg: Config, *, timeout: float, start: float) -> EnhanceResult:
     import urllib.error
     import urllib.request
 
@@ -605,7 +606,7 @@ def _run_ollama(raw_prompt: str, cfg: Config, *, start: float) -> EnhanceResult:
     url = cfg.ollama_base_url.rstrip("/") + "/api/chat"
     req = urllib.request.Request(url, data=body, headers={"Content-Type": "application/json"})
     try:
-        with urllib.request.urlopen(req, timeout=cfg.timeout) as resp:  # noqa: S310 -- local
+        with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310 -- local
             data = json.loads(resp.read())
     except (urllib.error.URLError, OSError, ValueError) as exc:
         return _fail_open(raw_prompt, f"ollama-error:{type(exc).__name__}", start, "ollama")
@@ -627,10 +628,19 @@ def _run_heuristic(raw_prompt: str, cfg: Config, *, start: float) -> EnhanceResu
     text = re.sub(r"[ \t]+", " ", raw_prompt.strip())
     text = re.sub(r"[ \t]*\n[ \t]*", "\n", text)
     text = re.sub(r"\n{3,}", "\n\n", text)
-    for i, ch in enumerate(text):  # capitalise the first alphabetic character
-        if ch.isalpha():
-            text = text[:i] + ch.upper() + text[i + 1 :]
-            break
+    # Capitalise the first letter of the first alphabetic word -- but skip a leading literal
+    # token (URL/path/code), where capitalising would corrupt a hard specific (e.g.
+    # "https://x" -> "Https://x", "`cfg`" -> "`Cfg`"). Because the faithfulness check is
+    # case-insensitive it would not even catch such corruption.
+    for m in re.finditer(r"\S+", text):
+        tok = m.group()
+        if not any(c.isalpha() for c in tok):
+            continue  # e.g. a leading "123" or "--": look at the next token
+        literal = "://" in tok or "/" in tok or "\\" in tok or "`" in tok or tok[:1] in "~.-"
+        if not literal:
+            j = next(k for k in range(m.start(), m.end()) if text[k].isalpha())
+            text = text[:j] + text[j].upper() + text[j + 1 :]
+        break  # only the first alphabetic word is considered
     if text and text[-1] not in ".!?:`)]\"'" and "\n" not in text:
         text += "."
     elapsed = time.monotonic() - start

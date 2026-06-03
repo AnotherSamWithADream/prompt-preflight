@@ -45,3 +45,32 @@ def test_plausible_length():
     assert not safety.plausible_length("a" * 100, "b" * 5, 0.2, 12.0)  # too short
     assert not safety.plausible_length("a" * 10, "b" * 200, 0.2, 12.0)  # runaway
     assert safety.plausible_length("", "anything", 0.2, 12.0)  # empty original -> ok
+
+
+def test_path_token_ignores_prose_slashes():
+    # Prose with slashes must NOT become must-keep-verbatim tokens, or the default-on
+    # faithfulness check would wrongly reject good rewrites of common prompts.
+    for prose in ("handle input/output", "use TCP/IP", "read and/or write", "due 12/25/2024"):
+        assert all("/" not in t for t in safety.important_tokens(prose))
+    # a genuinely rooted / drive-qualified path IS still a hard token
+    assert "/etc/hosts" in safety.important_tokens("edit /etc/hosts now")
+    assert any("config" in t for t in safety.important_tokens(r"open C:\app\config now"))
+
+
+def test_faithfulness_allows_reworded_slash_prose():
+    assert (
+        safety.missing_tokens(
+            "optimize read/write over TCP/IP",
+            "Improve reading and writing over the network protocol.",
+        )
+        == []
+    )
+
+
+def test_preamble_preserves_genuine_first_line():
+    # A meta-preamble that names the artifact is stripped...
+    assert safety.clean_output("Here is the improved prompt:\nDo X.") == "Do X."
+    # ...but a real first line that merely starts with "Here are X:" is preserved.
+    assert safety.clean_output("Here are the requirements:\n- a\n- b").startswith(
+        "Here are the requirements:"
+    )

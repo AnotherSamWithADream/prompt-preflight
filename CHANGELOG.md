@@ -27,7 +27,7 @@ All notable changes to this project are documented here. The format is based on
   and `enhance-cli stats`.
 - A local enhancing proxy (`ANTHROPIC_BASE_URL`) for true prompt replacement and the
   `enhance` launcher; proxy `/healthz`, `/readyz`, `/version`, `/stats` (with p50/p95
-  latency), and `/metrics` (Prometheus); dry-run mode; opt-in upstream keep-alive;
+  latency), and `/metrics` (Prometheus); dry-run mode;
   structural `logging` with `--log-level`; opt-in OpenTelemetry spans; a bounded
   enhancement concurrency limit; graceful `SIGTERM`/`SIGINT` shutdown; a request
   body-size cap; and an opt-in structured access log.

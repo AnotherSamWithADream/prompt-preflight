@@ -14,6 +14,8 @@ Appending leaves Claude Code's coding-assistant identity in place, which makes H
 the prompt is the documented choice for "a non-coding agent in a pipeline".
 """
 
+from functools import lru_cache
+
 ENHANCER_SYSTEM_PROMPT = """\
 You are a prompt pre-flight rewriter. Your ONLY job is to transform the user's raw input into a single, clearer, better-structured prompt that will be sent to a more capable AI model downstream.
 
@@ -85,6 +87,11 @@ _PROFILE_SUFFIXES = {
 }
 
 
+@lru_cache(maxsize=16)
 def system_prompt_for(profile: str = "default") -> str:
-    """Return the enhancer system prompt for ``profile`` (falls back to the default)."""
+    """Return the enhancer system prompt for ``profile`` (falls back to the default).
+
+    Memoized: the result depends only on ``profile`` and the (large, constant) base prompt,
+    so it is built once per profile instead of re-concatenated on every backend call.
+    """
     return ENHANCER_SYSTEM_PROMPT + _PROFILE_SUFFIXES.get(profile, "")

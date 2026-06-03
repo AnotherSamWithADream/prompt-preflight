@@ -37,6 +37,7 @@ from prompt_enhancer.config import (  # noqa: E402
     write_template,
 )
 from prompt_enhancer.engine import enhance  # noqa: E402
+from prompt_enhancer.policy import classify_prompt  # noqa: E402
 
 RAW_PREFIX = "//raw"
 
@@ -196,8 +197,13 @@ def _read_clipboard() -> str | None:
     if not cmd:
         return None
     try:
-        proc = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8")
-    except OSError:
+        # errors="replace": non-UTF-8 clipboard contents must not raise (would crash the
+        # watch loop); timeout: a hung clipboard tool (e.g. xclip awaiting selection
+        # ownership) must not block the loop forever.
+        proc = subprocess.run(
+            cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=5
+        )
+    except (OSError, ValueError, subprocess.SubprocessError):
         return None
     return proc.stdout if proc.returncode == 0 else None
 
@@ -431,7 +437,9 @@ def watch(cfg) -> int:
         interval = float(os.environ.get("PROMPT_ENHANCER_WATCH_INTERVAL", "1.0"))
     except ValueError:
         interval = 1.0
-    interval = max(0.3, interval)
+    if not interval == interval or interval == float("inf"):  # NaN or inf -> default
+        interval = 1.0
+    interval = max(0.3, min(interval, 3600.0))
     sys.stderr.write(
         f"enhance-cli watch -- rewriting new clipboard text every {interval:g}s. Ctrl-C to stop.\n"
     )
@@ -444,10 +452,12 @@ def watch(cfg) -> int:
             if current is None or current == last:
                 continue
             last = current
-            stripped, is_raw = strip_raw_prefix(current, cfg.bypass_prefix)
-            if is_raw or not current.strip() or len(current.split()) < cfg.word_threshold:
+            # Reuse the shared enhancement policy (//raw bypass, slash-command + short-prompt
+            # skipping) instead of re-implementing a subset of it here.
+            decision = classify_prompt(current, cfg)
+            if decision.action != "enhance":
                 continue
-            result = enhance(current, config=cfg)
+            result = enhance(decision.text, config=cfg)
             if result.enhanced and result.text != current and copy_to_clipboard(result.text):
                 # Re-read so our own write doesn't look like new input next tick.
                 last = _read_clipboard() or result.text
@@ -585,7 +595,7 @@ def run(argv: list[str] | None = None) -> int:
             f"enhance-cli: backend={result.backend} enhanced={result.enhanced} "
             f"error={result.error} elapsed={round(result.elapsed, 2)}s "
             f"profile={cfg.profile}"
-            + (f" cost=${result.cost_usd}" if result.cost_usd else "")
+            + (f" cost=${result.cost_usd}" if result.cost_usd is not None else "")
             + "\n"
         )
     if args.json:
@@ -609,7 +619,10 @@ def run(argv: list[str] | None = None) -> int:
     if args.yes:
         final = enhanced
     else:
-        raw, enhanced = _maybe_clarify(raw, enhanced, cfg)
+        # _maybe_clarify may refine the prompt (original + answered open questions); use that
+        # refined version only for the rewrite shown/accepted. On Reject we still fall back to
+        # the user's TRUE original, never the original-plus-injected-Q&A.
+        _, enhanced = _maybe_clarify(raw, enhanced, cfg)
         final = _choose(enhanced)
 
     if final is None:

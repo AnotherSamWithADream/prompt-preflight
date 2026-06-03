@@ -516,6 +516,52 @@ def test_heuristic_preserves_all_tokens(monkeypatch):
         assert tok in r.text  # faithfulness guard must pass
 
 
+def test_heuristic_does_not_corrupt_leading_url():
+    # Blind first-letter capitalisation would turn https:// into Https:// (and the
+    # case-insensitive faithfulness check would not catch it).
+    r = enhance(
+        "https://example.com/api fetch this data and summarize it for me", backend="heuristic"
+    )
+    assert r.enhanced
+    assert "https://example.com/api" in r.text
+    assert not r.text.startswith("Https")
+
+
+def test_heuristic_does_not_corrupt_leading_code_span():
+    r = enhance("`config.load()` should accept a path argument now", backend="heuristic")
+    assert r.enhanced and "`config.load()`" in r.text
+
+
+def test_heuristic_capitalizes_first_word_after_a_number():
+    # A leading number/flag must not block capitalising the first real word.
+    assert enhance("123 fix the parser now", backend="heuristic").text.startswith("123 Fix")
+    assert enhance("--flag then run it", backend="heuristic").text.startswith("--flag")
+
+
+def test_ollama_uses_per_call_timeout(monkeypatch):
+    import urllib.request
+
+    captured = {}
+
+    class _Resp:
+        def read(self):
+            return json.dumps({"message": {"content": PLAUSIBLE}}).encode()
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    def fake_urlopen(req, timeout=None):
+        captured["timeout"] = timeout
+        return _Resp()
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    enhance(LONG, backend="ollama", timeout=2.0, config=Config())
+    assert captured["timeout"] == 2.0  # the per-call override, not cfg.timeout (15.0)
+
+
 def test_auto_falls_back_to_heuristic_without_cli_or_key(monkeypatch):
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     monkeypatch.setattr(engine.shutil, "which", lambda name: None)  # no claude binary

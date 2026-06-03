@@ -106,6 +106,16 @@ def test_validate_new_enums():
     assert validate(ok) == []
 
 
+def test_validate_length_ratio_and_cooldown():
+    inverted = Config()
+    inverted.length_ratio_min = 5.0
+    inverted.length_ratio_max = 0.1
+    assert any("length_ratio" in p for p in validate(inverted))
+    neg = Config()
+    neg.circuit_breaker_cooldown = -1.0
+    assert any("cooldown" in p for p in validate(neg))
+
+
 def test_is_local_proxy_any_loopback_port():
     cfg = Config()  # proxy_port 8788
     # Non-default port still recognized as a local proxy (the hook fix #51)

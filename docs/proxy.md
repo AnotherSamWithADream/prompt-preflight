@@ -28,10 +28,9 @@ streams everything else through untouched:
 ## Response relay
 
 Responses are relayed **raw** — only the request body is changed — so streaming/SSE
-framing is preserved byte-for-byte. By default the proxy forces `Connection: close`
-upstream (one response = one socket; no framing to parse) and caches the TLS context to
-keep setup cheap. Setting `proxy_keep_alive` opts into a per-thread pooled upstream
-connection that re-frames responses as it relays them.
+framing is preserved byte-for-byte. The proxy forces `Connection: close` upstream (one
+response = one socket; no framing to parse), pipes upstream bytes to the client as they
+arrive, and caches the TLS context to keep per-request setup cheap.
 
 ## Endpoints
 

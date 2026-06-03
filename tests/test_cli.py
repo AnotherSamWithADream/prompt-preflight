@@ -377,6 +377,24 @@ def test_clarify_noop_without_questions():
     assert (raw, enhanced) == ("orig", "no open questions in this rewrite")
 
 
+def test_reject_after_clarify_restores_true_original(monkeypatch):
+    # After answering open questions (which appends an "Additional context" block) the user
+    # rejects: the clipboard must get the TRUE original, never original + injected Q&A.
+    box = _capture_clipboard(monkeypatch)
+    with_questions = "Build it.\n\nOpen questions:\n- Which framework?"
+
+    def fake_enhance(raw, **k):
+        text = "REFINED" if "Additional context" in raw else with_questions
+        return EnhanceResult(text, True, raw)
+
+    monkeypatch.setattr(cli, "enhance", fake_enhance)
+    answers = iter(["y", "React", "r"])  # answer prompt, the question, then [R]eject
+    monkeypatch.setattr(cli, "_prompt_line", lambda msg: next(answers, ""))
+    original = "build an app with good structure and clear modules please now thanks"
+    cli.run(original.split())
+    assert box["text"] == original  # not original + "Additional context: ..."
+
+
 def test_watch_requires_clipboard_reader(monkeypatch):
     monkeypatch.setattr(cli, "_read_clipboard", lambda: None)
     assert cli.watch(cli.load_config()) == 1

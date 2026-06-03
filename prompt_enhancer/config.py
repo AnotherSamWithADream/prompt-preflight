@@ -29,7 +29,7 @@ from urllib.parse import urlsplit
 class Config:
     # --- behaviour ---------------------------------------------------------
     enabled: bool = True
-    backend: str = "auto"  # "auto" | "cli" | "api" | "openai" | "ollama"
+    backend: str = "auto"  # auto | cli | api | openai | ollama | heuristic (or a plugin name)
     profile: str = "default"  # rewrite profile: default | concise | detailed | coding | research
     word_threshold: int = 12  # prompts shorter than this are passed through
     bypass_prefix: str = "//raw"  # skip-enhancement marker
@@ -82,9 +82,6 @@ class Config:
     proxy_max_body_bytes: int = 16_000_000  # reject oversized request bodies
     proxy_max_concurrency: int = 4  # max simultaneous enhancement calls
     proxy_dry_run: bool = False  # log the decision but never modify requests (measure traffic)
-    proxy_keep_alive: bool = (
-        False  # reuse upstream connections (opt-in; default closes per request)
-    )
     otel_enabled: bool = False  # emit OpenTelemetry spans around enhancement (opt-in)
     allow_public_bind: bool = False  # refuse non-loopback proxy_host unless True
     # Text blocks containing this marker are treated as injected context, not the human
@@ -166,7 +163,6 @@ _ENV_MAP = {
     "PROMPT_ENHANCER_PROXY_MAX_BODY_BYTES": "proxy_max_body_bytes",
     "PROMPT_ENHANCER_PROXY_MAX_CONCURRENCY": "proxy_max_concurrency",
     "PROMPT_ENHANCER_PROXY_DRY_RUN": "proxy_dry_run",
-    "PROMPT_ENHANCER_PROXY_KEEP_ALIVE": "proxy_keep_alive",
     "PROMPT_ENHANCER_OTEL": "otel_enabled",
     "PROMPT_ENHANCER_ALLOW_PUBLIC_BIND": "allow_public_bind",
     "PROMPT_ENHANCER_PROXY_REMINDER_MARKER": "proxy_reminder_marker",
@@ -221,6 +217,17 @@ def validate(cfg: Config) -> list:
         problems.append(f"timeout must be > 0, got {cfg.timeout}")
     if cfg.api_retries < 0:
         problems.append(f"api_retries must be >= 0, got {cfg.api_retries}")
+    if cfg.length_ratio_min < 0 or cfg.length_ratio_max <= 0:
+        problems.append("length_ratio_min/length_ratio_max must be >= 0 and > 0 respectively")
+    elif cfg.length_ratio_min > cfg.length_ratio_max:
+        problems.append(
+            f"length_ratio_min ({cfg.length_ratio_min}) must be <= "
+            f"length_ratio_max ({cfg.length_ratio_max})"
+        )
+    if cfg.circuit_breaker_cooldown < 0:
+        problems.append(
+            f"circuit_breaker_cooldown must be >= 0, got {cfg.circuit_breaker_cooldown}"
+        )
     return problems
 
 

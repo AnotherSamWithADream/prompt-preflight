@@ -7,11 +7,12 @@ request (background/title calls, tool-loop turns, non-message endpoints) streams
 untouched.
 
 The response is relayed **raw** (we only change the request body), so streaming/SSE
-framing is preserved byte-for-byte. By default we force ``Connection: close`` upstream so
-one response == one socket lifetime and there is no response framing to parse (we cache
-the TLS context to keep per-request setup cheap). Setting ``proxy_keep_alive`` opts into a
-per-thread pooled upstream connection that re-frames responses as it relays them -- a
-little faster, at the cost of the connection-reframing code path.
+framing is preserved byte-for-byte: we force ``Connection: close`` upstream so one
+response == one socket lifetime and there is no response framing to parse, and we pipe
+upstream bytes to the client as they arrive (we cache the TLS context to keep per-request
+setup cheap). A pooled upstream keep-alive path was evaluated and dropped -- ``http.client``
+buffers reads, which breaks incremental SSE delivery, and retrying a pooled connection
+risks resubmitting a non-idempotent ``POST``.
 
 Also serves ``GET /healthz``, ``/readyz``, ``/version``, ``/stats``, and ``/metrics``
 (Prometheus) for monitoring.
@@ -25,7 +26,6 @@ from __future__ import annotations
 
 import argparse
 import contextlib
-import http.client
 import json
 import logging
 import os
@@ -56,19 +56,6 @@ _HOP_BY_HOP = {
 
 # Built once: constructing an SSLContext loads the CA bundle and is not free.
 _SSL_CONTEXT = ssl.create_default_context()
-
-# Per-thread pooled upstream connection, used only when proxy_keep_alive is enabled.
-_thread_conn = threading.local()
-
-
-def _new_upstream_conn(up, cfg: Config):
-    host = up.hostname
-    port = up.port or (443 if up.scheme == "https" else 80)
-    if up.scheme == "https":
-        return http.client.HTTPSConnection(
-            host, port, timeout=cfg.proxy_upstream_timeout, context=_SSL_CONTEXT
-        )
-    return http.client.HTTPConnection(host, port, timeout=cfg.proxy_upstream_timeout)
 
 
 #: Structural logger -- emits metadata only, never prompt text (see :func:`_setup_logging`).
@@ -387,6 +374,7 @@ class _Handler(BaseHTTPRequestHandler):
 
         t0 = time.monotonic()
         did = False
+        self._relay_started = False  # set once any upstream byte is written to the client
         if self.command == "POST" and _is_messages_path(self.path):
             try:
                 body, did = rewrite_request_body(
@@ -415,7 +403,12 @@ class _Handler(BaseHTTPRequestHandler):
             if self._stats:
                 self._stats.record(rewrote=did)
                 self._stats.note_upstream_error()
-            self._safe_error(502, f"upstream error: {type(exc).__name__}: {exc}")
+            # If the upstream failed mid-stream we have already written part of the response;
+            # injecting a 502 status line now would corrupt it, so just drop the connection.
+            if self._relay_started:
+                self.close_connection = True
+            else:
+                self._safe_error(502, f"upstream error: {type(exc).__name__}: {exc}")
 
     do_POST = _relay
     do_GET = _relay
@@ -437,8 +430,6 @@ class _Handler(BaseHTTPRequestHandler):
         return out
 
     def _forward(self, body: bytes):
-        if self._cfg.proxy_keep_alive:
-            return self._forward_keepalive(body)
         return self._forward_close(body)
 
     def _forward_close(self, body: bytes):
@@ -465,6 +456,7 @@ class _Handler(BaseHTTPRequestHandler):
                 data = sock.recv(65536)
                 if not data:
                     break
+                self._relay_started = True  # bytes are on the wire: no error page after this
                 self.wfile.write(data)
                 self.wfile.flush()
         finally:
@@ -472,48 +464,6 @@ class _Handler(BaseHTTPRequestHandler):
                 sock.close()
             except OSError:
                 pass
-
-    def _forward_keepalive(self, body: bytes):
-        """Pooled upstream connection (reused per thread). Re-frames the response as chunked."""
-        up = urlsplit(self._cfg.upstream_base)
-        key = (up.scheme, up.hostname, up.port)
-        conn = getattr(_thread_conn, "conn", None)
-        if conn is None or getattr(_thread_conn, "key", None) != key:
-            conn = _new_upstream_conn(up, self._cfg)
-            _thread_conn.conn, _thread_conn.key = conn, key
-        headers = self._fwd_headers()
-        headers["Host"] = up.hostname
-        try:
-            conn.request(self.command, self.path, body=body, headers=headers)
-            resp = conn.getresponse()
-        except (http.client.HTTPException, OSError):
-            try:
-                conn.close()
-            except OSError:
-                pass
-            conn = _new_upstream_conn(up, self._cfg)
-            _thread_conn.conn = conn
-            conn.request(self.command, self.path, body=body, headers=headers)
-            resp = conn.getresponse()
-
-        self.send_response_only(resp.status, resp.reason or "")
-        for k, v in resp.getheaders():
-            if k.lower() in ("connection", "keep-alive", "transfer-encoding", "content-length"):
-                continue
-            self.send_header(k, v)
-        self.send_header("Transfer-Encoding", "chunked")
-        self.end_headers()
-        while True:
-            chunk = resp.read(65536)
-            self._write_chunk(chunk)
-            if not chunk:
-                break  # terminator written
-
-    def _write_chunk(self, data: bytes):
-        self.wfile.write(f"{len(data):X}\r\n".encode("ascii"))
-        self.wfile.write(data)
-        self.wfile.write(b"\r\n")
-        self.wfile.flush()
 
     def _respond_json(self, code: int, obj: dict):
         payload = json.dumps(obj).encode("utf-8")

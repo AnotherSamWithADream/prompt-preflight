@@ -56,7 +56,12 @@ _FILE = re.compile(
     r"\b[\w./\\-]*\.(?:py|js|ts|tsx|jsx|java|go|rs|c|cpp|cc|h|hpp|json|ya?ml|toml|md|txt|"
     r"csv|tsv|sql|sh|ps1|rb|php|html|css|xml|cfg|ini|env|lock|cs|kt|swift)\b"
 )
-_PATH = re.compile(r"\b[\w.-]+[/\\][\w./\\-]+")
+# Only clearly path-like tokens (rooted, relative, or drive-qualified) count as hard
+# specifics. Ordinary prose with a slash -- "input/output", "TCP/IP", "and/or", "12/25/2024"
+# -- must NOT be treated as a must-keep-verbatim token, or the default-on faithfulness check
+# would silently reject good rewrites of common prompts. Extension-bearing files are covered
+# by _FILE above.
+_PATH = re.compile(r"(?<!\w)(?:\.{0,2}/|~/|[A-Za-z]:[\\/])[\w./\\-]+")
 _BIGNUM = re.compile(r"\b\d{4,}\b")
 
 
@@ -82,9 +87,16 @@ def missing_tokens(original: str, rewrite: str) -> list:
 # Output cleanup + length plausibility                                        #
 # --------------------------------------------------------------------------- #
 
+# A leading meta-preamble the model sometimes adds despite instructions, e.g.
+# "Here is the rewritten prompt:" or "Sure, here's the improved version:". We strip it ONLY
+# when it explicitly references the rewrite artifact (prompt/version/rewrite/...), so a
+# genuine first line of content like "Here are the requirements:" is preserved.
 _PREAMBLE = re.compile(
-    r"(?is)^\s*(?:sure|okay|certainly|here(?:'s| is| are)|the rewritten prompt is)"
-    r"[^\n:]{0,80}:\s*\n"
+    r"(?is)^\s*(?:(?:sure|okay|certainly|of course)[,!. ]+)?(?:"
+    r"here(?:'s| is| are)[^\n:]*?\b(?:prompt|version|rewrite|rewording|request|wording)\b[^\n:]{0,40}"
+    r"|(?:the\s+)?(?:rewritten|improved|revised|clarified|enhanced|refined)\s+(?:prompt|version)"
+    r"[^\n:]{0,40}"
+    r"):\s*\n"
 )
 
 
