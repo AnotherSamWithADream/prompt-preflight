@@ -6,6 +6,17 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-09-18
+
+### Fixed
+- **Faithfulness guard rejected faithful rewrites that reformat a number.** A model that
+  renders `10000 rps` as `10,000 RPS` has preserved the number exactly, but the
+  exact-substring check failed it, so the whole rewrite was discarded. Numeric tokens are
+  now matched against a separator-stripped copy of the rewrite; a number that is genuinely
+  dropped is still caught. Found by A/B-testing Haiku against Sonnet -- **both** models
+  failed the identical prompt, which is what exposed it as a guard bug rather than a model
+  limitation.
+
 ## [0.3.0] - 2026-09-18
 
 ### Added

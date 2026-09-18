@@ -77,10 +77,28 @@ def important_tokens(text: str) -> set:
     return {t for t in tokens if t and len(t) >= 2}
 
 
+#: Digit-group separators a faithful rewrite may legitimately introduce ("10000" -> "10,000").
+_NUM_SEP = re.compile(r"(?<=\d)[,_ ](?=\d)")
+
+
 def missing_tokens(original: str, rewrite: str) -> list:
-    """Hard tokens present in ``original`` but absent from ``rewrite`` (case-insensitive)."""
+    """Hard tokens present in ``original`` but absent from ``rewrite`` (case-insensitive).
+
+    Numeric tokens are also matched against a separator-stripped copy of the rewrite: a
+    model that renders ``10000 rps`` as ``10,000 RPS`` has preserved the number exactly,
+    and must not be failed for formatting it.
+    """
     low = rewrite.lower()
-    return [t for t in important_tokens(original) if t.lower() not in low]
+    ungrouped = _NUM_SEP.sub("", low)
+    missing = []
+    for token in important_tokens(original):
+        low_token = token.lower()
+        if low_token in low:
+            continue
+        if token.isdigit() and low_token in ungrouped:
+            continue
+        missing.append(token)
+    return missing
 
 
 # --------------------------------------------------------------------------- #

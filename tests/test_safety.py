@@ -120,3 +120,13 @@ def test_looks_well_formed_is_conservative():
         "make my code better and faster and nicer somehow, improve the stuff in there "
         "properly and optimize whatever looks bad honestly just do something good"
     )
+
+
+def test_numeric_tokens_survive_thousands_separators():
+    # Found by the Haiku/Sonnet A/B: BOTH models rendered "10000 rps" as "10,000 RPS" --
+    # a faithful rewrite that the exact-substring check wrongly rejected.
+    assert safety.missing_tokens("at 10000 rps", "Handle 10,000 RPS with heavy writes.") == []
+    assert safety.missing_tokens("at 10000 rps", "Handle 10000 RPS.") == []
+    assert safety.missing_tokens("port 8788 and 100000 rows", "Port 8788, 100,000 rows.") == []
+    # ...but a number that is genuinely dropped is still caught.
+    assert safety.missing_tokens("at 10000 rps", "Handle high throughput.") == ["10000"]
