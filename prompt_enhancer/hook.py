@@ -60,7 +60,15 @@ def decide(prompt: str, cfg=None):
         return None
     result = enhance(prompt, config=cfg)
     if not result.enhanced:
-        return None  # fail open
+        # Fail open. Silently by default -- but a silent skip is indistinguishable from a
+        # broken install (exactly how a --bare auth regression once went unnoticed for
+        # months), so `show_skips` surfaces the reason without changing the prompt.
+        if getattr(cfg, "show_skips", False):
+            return (
+                f"[prompt pre-flight] enhancement skipped ({result.error or 'unavailable'}); "
+                "the user's prompt above is unmodified."
+            )
+        return None
     return format_context(result.text, cfg.hook_output_style)
 
 

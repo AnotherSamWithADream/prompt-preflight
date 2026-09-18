@@ -24,13 +24,15 @@ import os
 from dataclasses import asdict, dataclass, fields
 from urllib.parse import urlsplit
 
+from prompt_enhancer.system_prompt import _PROFILE_SUFFIXES
+
 
 @dataclass
 class Config:
     # --- behaviour ---------------------------------------------------------
     enabled: bool = True
     backend: str = "auto"  # auto | cli | api | openai | ollama | heuristic (or a plugin name)
-    profile: str = "default"  # rewrite profile: default | concise | detailed | coding | research
+    profile: str = "default"  # "auto" picks per-prompt; see system_prompt._PROFILE_SUFFIXES
     word_threshold: int = 12  # prompts shorter than this are passed through
     bypass_prefix: str = "//raw"  # skip-enhancement marker
     max_prompt_chars: int = (
@@ -49,6 +51,21 @@ class Config:
     cache_results: bool = False  # memoize identical prompts within the process
     circuit_breaker_threshold: int = 5  # consecutive fail-opens before pausing (0 = off)
     circuit_breaker_cooldown: float = 60.0  # seconds to pause after the breaker trips
+
+    # --- context: resolve vague references into concrete terms -------------
+    repo_context: bool = True  # include lightweight project facts (language/framework)
+    conversation_turns: int = 4  # prior proxy turns used to resolve "it"/"that" (0 = off)
+
+    # --- output shape / extra guards ---------------------------------------
+    structured_output: bool = False  # ask the model for strict JSON (off: small models drift)
+    injection_guard: bool = True  # reject a rewrite that adds override text / new domains
+    skip_well_formed: bool = True  # don't pay to rewrite an already-clear prompt
+
+    # --- observability: METADATA ONLY, local-only, never prompt text --------
+    ledger: bool = True  # append one metadata line per decision
+    ledger_path: str = ""  # "" -> per-user state dir
+    monthly_budget_usd: float = 0.0  # 0 = no cap; above it enhancement fails open
+    show_skips: bool = False  # hook emits a one-line note when it fails open
 
     # --- CLI backend (claude -p, reuses Claude Code auth, no API key) -------
     model: str = "haiku"  # --model alias/name
@@ -147,6 +164,15 @@ _ENV_MAP = {
     "PROMPT_ENHANCER_WARN_PII": "warn_pii",
     "PROMPT_ENHANCER_CACHE_RESULTS": "cache_results",
     "PROMPT_ENHANCER_CIRCUIT_BREAKER_THRESHOLD": "circuit_breaker_threshold",
+    "PROMPT_ENHANCER_REPO_CONTEXT": "repo_context",
+    "PROMPT_ENHANCER_CONVERSATION_TURNS": "conversation_turns",
+    "PROMPT_ENHANCER_STRUCTURED_OUTPUT": "structured_output",
+    "PROMPT_ENHANCER_INJECTION_GUARD": "injection_guard",
+    "PROMPT_ENHANCER_SKIP_WELL_FORMED": "skip_well_formed",
+    "PROMPT_ENHANCER_LEDGER": "ledger",
+    "PROMPT_ENHANCER_LEDGER_PATH": "ledger_path",
+    "PROMPT_ENHANCER_MONTHLY_BUDGET_USD": "monthly_budget_usd",
+    "PROMPT_ENHANCER_SHOW_SKIPS": "show_skips",
     "PROMPT_ENHANCER_MODEL": "model",
     "PROMPT_ENHANCER_MAX_TURNS": "max_turns",
     "PROMPT_ENHANCER_TIMEOUT": "timeout",
@@ -181,7 +207,7 @@ _ENV_MAP = {
 #: Allowed values for the ``backend`` field.
 _VALID_BACKENDS = ("auto", "cli", "api", "openai", "ollama", "heuristic")
 #: Allowed values for the ``profile`` field.
-_VALID_PROFILES = ("default", "concise", "detailed", "coding", "research")
+_VALID_PROFILES = ("auto",) + tuple(sorted(_PROFILE_SUFFIXES))
 #: Allowed values for the ``api_provider`` field.
 _VALID_API_PROVIDERS = ("anthropic", "bedrock", "vertex")
 #: Allowed values for the ``hook_output_style`` field.
@@ -232,6 +258,10 @@ def validate(cfg: Config) -> list:
             f"length_ratio_min ({cfg.length_ratio_min}) must be <= "
             f"length_ratio_max ({cfg.length_ratio_max})"
         )
+    if cfg.monthly_budget_usd < 0:
+        problems.append(f"monthly_budget_usd must be >= 0, got {cfg.monthly_budget_usd}")
+    if cfg.conversation_turns < 0:
+        problems.append(f"conversation_turns must be >= 0, got {cfg.conversation_turns}")
     if cfg.circuit_breaker_cooldown < 0:
         problems.append(
             f"circuit_breaker_cooldown must be >= 0, got {cfg.circuit_breaker_cooldown}"

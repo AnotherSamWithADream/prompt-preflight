@@ -443,3 +443,66 @@ def test_run_dispatches_repl(monkeypatch):
     monkeypatch.setattr(cli, "repl", fake_repl)
     assert cli.run(["--repl"]) == 0
     assert called.get("repl")
+
+
+# --- ledger-backed observability commands ----------------------------------- #
+
+
+def _seed_ledger(monkeypatch, tmp_path):
+    from prompt_enhancer import ledger
+
+    monkeypatch.setenv("PROMPT_ENHANCER_LEDGER", "1")
+    monkeypatch.setenv("PROMPT_ENHANCER_LEDGER_PATH", str(tmp_path / "l.jsonl"))
+    cfg = cli.load_config()
+    ledger.record(
+        cfg,
+        event="enhanced",
+        backend="cli",
+        profile="coding",
+        elapsed=1.0,
+        chars_in=20,
+        chars_out=90,
+        cost_usd=0.01,
+    )
+    ledger.record(cfg, event="fail-open", backend="cli", reason="timeout")
+    ledger.record(cfg, event="skip", reason="well-formed")
+    return cfg
+
+
+def test_stats_local_reports_the_ledger(monkeypatch, tmp_path, capsys):
+    _seed_ledger(monkeypatch, tmp_path)
+    assert cli.stats_main(["--local"]) == 0
+    out = capsys.readouterr().out
+    assert "enhanced" in out
+    assert "fail-open" in out
+    assert "timeout" in out  # the reason is surfaced, so a silent breakage is visible
+
+
+def test_stats_local_reports_when_empty(monkeypatch, tmp_path):
+    monkeypatch.setenv("PROMPT_ENHANCER_LEDGER", "1")
+    monkeypatch.setenv("PROMPT_ENHANCER_LEDGER_PATH", str(tmp_path / "empty.jsonl"))
+    assert cli.stats_main(["--local"]) == 1
+
+
+def test_digest_outputs_a_summary(monkeypatch, tmp_path, capsys):
+    _seed_ledger(monkeypatch, tmp_path)
+    assert cli.digest_main(["--days", "7"]) == 0
+    out = capsys.readouterr().out.lower()
+    assert "digest" in out and "enhanced" in out
+
+
+def test_statusline_is_one_compact_line(monkeypatch, tmp_path, capsys):
+    _seed_ledger(monkeypatch, tmp_path)
+    assert cli.statusline_main([]) == 0
+    out = capsys.readouterr().out.strip()
+    assert "preflight" in out
+    assert len(out.splitlines()) == 1
+
+
+def test_statusline_never_raises(monkeypatch, capsys):
+    # A statusline command that crashes is worse than none: it must always exit 0.
+    def boom():
+        raise RuntimeError("config exploded")
+
+    monkeypatch.setattr(cli, "load_config", boom)
+    assert cli.statusline_main([]) == 0

@@ -26,6 +26,12 @@ def _clean_env(monkeypatch, tmp_path):
     # Point config resolution at a non-existent file so every test starts from defaults.
     monkeypatch.setenv("PROMPT_ENHANCER_CONFIG", str(tmp_path / "no-config.json"))
 
+    # The usage ledger is ON by default -- tests must NEVER append to the developer's real
+    # one. Disabled here, and pointed at a temp path so a test that re-enables it is still
+    # sandboxed.
+    monkeypatch.setenv("PROMPT_ENHANCER_LEDGER", "0")
+    monkeypatch.setenv("PROMPT_ENHANCER_LEDGER_PATH", str(tmp_path / "ledger.jsonl"))
+
     # Clear memoized binary resolution / API clients so per-test mocks are honored.
     from prompt_enhancer import engine
 

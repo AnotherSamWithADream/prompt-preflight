@@ -30,17 +30,25 @@ import shutil
 import subprocess
 import sys
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
+from prompt_enhancer import ledger as _ledger_mod
 from prompt_enhancer.config import Config, load_config, points_at_proxy
 from prompt_enhancer.safety import (
     clean_output,
     find_pii,
     find_secret,
+    injection_risk,
+    looks_well_formed,
     missing_tokens,
     plausible_length,
 )
-from prompt_enhancer.system_prompt import ENHANCER_SYSTEM_PROMPT, system_prompt_for
+from prompt_enhancer.system_prompt import (
+    ENHANCER_SYSTEM_PROMPT,
+    build_context_block,
+    choose_profile,
+    system_prompt_for,
+)
 
 #: Set in the child environment so a nested ``claude -p`` invocation -- and the
 #: UserPromptSubmit hook it would fire -- detect the recursion and pass through.
@@ -245,6 +253,120 @@ def _model_for(chosen: str, cfg: Config, model: str | None, api_model: str | Non
     }.get(chosen, cfg.model)
 
 
+# --------------------------------------------------------------------------- #
+# Context, budget and ledger helpers                                          #
+# --------------------------------------------------------------------------- #
+
+_repo_cache: dict = {}
+_budget_cache: dict = {"at": 0.0, "spent": 0.0}
+
+#: Marker file -> stack label, used to give the rewriter the project's real vocabulary.
+_STACK_MARKERS = {
+    "pyproject.toml": "Python",
+    "setup.py": "Python",
+    "requirements.txt": "Python",
+    "package.json": "Node/JavaScript",
+    "tsconfig.json": "TypeScript",
+    "go.mod": "Go",
+    "Cargo.toml": "Rust",
+    "pom.xml": "Java (Maven)",
+    "build.gradle": "Java (Gradle)",
+    "Gemfile": "Ruby",
+    "composer.json": "PHP",
+    "CMakeLists.txt": "C/C++",
+}
+
+
+def _in_git_repo() -> bool:
+    try:
+        return os.path.isdir(os.path.join(os.getcwd(), ".git"))
+    except OSError:
+        return False
+
+
+def _repo_facts(cfg: Config) -> str:
+    """Lightweight, non-sensitive project facts (stack + whether it is a repo).
+
+    Deliberately excludes paths, repo names and file contents -- enough to let the rewriter
+    use the right vocabulary, nothing that could leak client detail. Cached per directory.
+    """
+    if not getattr(cfg, "repo_context", False):
+        return ""
+    try:
+        cwd = os.getcwd()
+    except OSError:
+        return ""
+    if cwd in _repo_cache:
+        return _repo_cache[cwd]
+    facts = []
+    try:
+        stacks = sorted(
+            {v for k, v in _STACK_MARKERS.items() if os.path.isfile(os.path.join(cwd, k))}
+        )
+        if stacks:
+            facts.append("stack: " + ", ".join(stacks))
+        if os.path.isdir(os.path.join(cwd, ".git")):
+            facts.append("this is a git repository")
+    except OSError:
+        pass
+    out = "\n".join(facts)
+    _repo_cache[cwd] = out
+    return out
+
+
+def _over_budget(cfg: Config) -> bool:
+    """True once month-to-date spend reaches ``monthly_budget_usd``. Cached for 60s so the
+    ledger is not re-read on every prompt."""
+    now = time.monotonic()
+    if now - _budget_cache["at"] > 60.0:
+        try:
+            _budget_cache["spent"] = _ledger_mod.month_to_date_cost(cfg)
+        except Exception:  # noqa: BLE001
+            _budget_cache["spent"] = 0.0
+        _budget_cache["at"] = now
+    return _budget_cache["spent"] >= cfg.monthly_budget_usd
+
+
+def _ledger(cfg: Config, event: str, **kw) -> None:
+    try:
+        _ledger_mod.record(cfg, event=event, **kw)
+    except Exception:  # noqa: BLE001 -- observability must never break enhancement
+        pass
+
+
+def _sysprompt_for(payload: str, cfg: Config) -> str:
+    """System prompt for a backend call. The context-rules block is added only when the
+    payload actually carries a <context> block, so the no-context path stays byte-identical
+    to the validated base prompt (and stays prompt-cache friendly)."""
+    return system_prompt_for(
+        cfg.profile, payload.startswith("<context>"), bool(cfg.structured_output)
+    )
+
+
+def _parse_structured(text: str):
+    """Parse a structured (JSON) rewrite into rendered text, or None if it is not JSON.
+
+    Tolerant by design: accepts a bare object or one wrapped in prose/fences, because small
+    models drift. Returns None so the caller can fall back to treating the output as prose.
+    """
+    candidates = [text.strip()]
+    match = re.search(r"\{.*\}", text, re.S)
+    if match:
+        candidates.append(match.group(0))
+    for cand in candidates:
+        try:
+            data = json.loads(cand)
+        except (ValueError, TypeError):
+            continue
+        if isinstance(data, dict) and isinstance(data.get("rewritten"), str):
+            out = data["rewritten"].strip()
+            qs = [str(q).strip() for q in (data.get("open_questions") or []) if str(q).strip()]
+            if qs:
+                out += "\n\nOpen questions:\n" + "\n".join("- " + q for q in qs)
+            return out
+    return None
+
+
 def _breaker_is_open(cfg: Config) -> bool:
     return cfg.circuit_breaker_threshold > 0 and time.monotonic() < _breaker["open_until"]
 
@@ -270,8 +392,13 @@ def enhance(
     timeout: float | None = None,
     max_turns: int | None = None,
     config: Config | None = None,
+    conversation: str = "",
 ) -> EnhanceResult:
-    """Rewrite ``raw_prompt``, failing open to the original on any problem."""
+    """Rewrite ``raw_prompt``, failing open to the original on any problem.
+
+    ``conversation`` is optional recent-turn text used only to resolve vague references
+    ("it", "the same thing") into concrete terms; it is never rewritten or returned.
+    """
     original = raw_prompt
     if not raw_prompt or not raw_prompt.strip():
         return EnhanceResult(original, False, original, error="empty-input")
@@ -292,6 +419,19 @@ def enhance(
         if pii:
             sys.stderr.write(f"prompt-enhancer: warning: prompt may contain {pii}\n")
 
+    # An already-clear prompt gains nothing from a rewrite -- don't pay latency or cost.
+    if cfg.skip_well_formed and looks_well_formed(raw_prompt):
+        _ledger(cfg, "skip", reason="well-formed", chars_in=len(original))
+        return EnhanceResult(original, False, original, error="well-formed")
+
+    # Spend cap. Never blocks the prompt -- it just stops enhancing until next month.
+    if cfg.monthly_budget_usd > 0 and _over_budget(cfg):
+        _ledger(cfg, "skip", reason="budget-exceeded", chars_in=len(original))
+        return EnhanceResult(original, False, original, error="budget-exceeded")
+
+    if cfg.profile == "auto":
+        cfg = replace(cfg, profile=choose_profile(raw_prompt, _in_git_repo()))
+
     chosen = _select_backend(backend or cfg.backend, cfg)
     eff_timeout = cfg.timeout if timeout is None else timeout
 
@@ -305,20 +445,25 @@ def enhance(
     if _breaker_is_open(cfg):
         return EnhanceResult(original, False, original, error="circuit-open", backend=chosen)
 
+    # What the rewriter actually sees: an optional read-only context block, then the prompt.
+    # Guards below still compare against `original`, so context can never count as content.
+    payload = build_context_block(conversation, _repo_facts(cfg)) + raw_prompt
+
     start = time.monotonic()
     if chosen == "api":
         result = _run_api(
-            raw_prompt, cfg, model=api_model or cfg.api_model, timeout=eff_timeout, start=start
+            payload, cfg, model=api_model or cfg.api_model, timeout=eff_timeout, start=start
         )
     elif chosen == "openai":
-        result = _run_openai(raw_prompt, cfg, timeout=eff_timeout, start=start)
+        result = _run_openai(payload, cfg, timeout=eff_timeout, start=start)
     elif chosen == "ollama":
-        result = _run_ollama(raw_prompt, cfg, timeout=eff_timeout, start=start)
+        result = _run_ollama(payload, cfg, timeout=eff_timeout, start=start)
     elif chosen == "heuristic":
+        # Pure text normaliser -- give it the bare prompt, never the context block.
         result = _run_heuristic(raw_prompt, cfg, start=start)
     elif chosen == "cli":
         result = _run_cli(
-            raw_prompt,
+            payload,
             cfg,
             model=model or cfg.model,
             max_turns=str(cfg.max_turns if max_turns is None else max_turns),
@@ -326,14 +471,36 @@ def enhance(
             start=start,
         )
     else:
-        result = _run_plugin(chosen, raw_prompt, cfg, start=start)
+        result = _run_plugin(chosen, payload, cfg, start=start)
 
     if result.enhanced:
         result = _postprocess(original, result, cfg, start)
+    else:
+        # Backends fail open to whatever they were *sent*. Restore the user's real text so
+        # a context block can never leak downstream as if it were their prompt.
+        result = EnhanceResult(
+            original,
+            False,
+            original,
+            error=result.error,
+            elapsed=result.elapsed,
+            backend=result.backend,
+        )
 
     _breaker_note(cfg, result.enhanced)
     if result.enhanced and key is not None:
         _result_cache[key] = result
+    _ledger(
+        cfg,
+        "enhanced" if result.enhanced else "fail-open",
+        backend=result.backend,
+        profile=cfg.profile,
+        elapsed=result.elapsed,
+        chars_in=len(original),
+        chars_out=len(result.text),
+        cost_usd=result.cost_usd,
+        reason=result.error,
+    )
     return result
 
 
@@ -349,16 +516,29 @@ def _cache_key(raw: str, backend: str, model: str, profile: str) -> str:
 
 
 def _postprocess(original: str, result: EnhanceResult, cfg: Config, start: float) -> EnhanceResult:
-    """Apply output cleanup + faithfulness/length guards. Fails open on violation."""
-    text = clean_output(result.text) if cfg.clean_output else result.text
+    """Apply structured parsing + cleanup + faithfulness/length/injection guards.
+    Fails open on any violation."""
+    raw = result.text
+    if cfg.structured_output:
+        # Small models drift off strict JSON, so a parse failure is NOT an error: fall
+        # back to treating the output as ordinary prose.
+        parsed = _parse_structured(raw)
+        if parsed is not None:
+            raw = parsed
+
+    text = clean_output(raw) if cfg.clean_output else raw
     if not text.strip():
         return _fail_open(original, "empty-after-clean", start, result.backend or "?")
     if cfg.faithfulness_check and missing_tokens(original, text):
         return _fail_open(original, "faithfulness", start, result.backend or "?")
     if not plausible_length(original, text, cfg.length_ratio_min, cfg.length_ratio_max):
         return _fail_open(original, "implausible-length", start, result.backend or "?")
-    if text == result.text:
-        return result
+    if cfg.injection_guard:
+        # The rewrite is fed to a stronger, agentic model -- it must not smuggle in
+        # instruction-override text or domains the user never wrote.
+        risk = injection_risk(original, text)
+        if risk:
+            return _fail_open(original, f"injection:{risk}", start, result.backend or "?")
     return EnhanceResult(
         text,
         True,
@@ -427,7 +607,7 @@ def _run_cli(
             model=model,
             max_turns=max_turns,
             binary=resolve_claude_binary(),
-            system=system_prompt_for(cfg.profile),
+            system=_sysprompt_for(raw_prompt, cfg),
             bare=bare,
         )
         return subprocess.run(
@@ -513,7 +693,7 @@ def _run_api(
     system = [
         {
             "type": "text",
-            "text": system_prompt_for(cfg.profile),
+            "text": _sysprompt_for(raw_prompt, cfg),
             "cache_control": {"type": "ephemeral"},
         }
     ]
@@ -584,7 +764,7 @@ def _run_openai(raw_prompt: str, cfg: Config, *, timeout: float, start: float) -
             max_tokens=cfg.api_max_tokens,
             timeout=timeout,
             messages=[
-                {"role": "system", "content": system_prompt_for(cfg.profile)},
+                {"role": "system", "content": _sysprompt_for(raw_prompt, cfg)},
                 {"role": "user", "content": raw_prompt},
             ],
         )
@@ -607,7 +787,7 @@ def _run_ollama(raw_prompt: str, cfg: Config, *, timeout: float, start: float) -
             "model": cfg.ollama_model,
             "stream": False,
             "messages": [
-                {"role": "system", "content": system_prompt_for(cfg.profile)},
+                {"role": "system", "content": _sysprompt_for(raw_prompt, cfg)},
                 {"role": "user", "content": raw_prompt},
             ],
         }

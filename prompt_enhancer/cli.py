@@ -30,6 +30,7 @@ from shutil import which
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from prompt_enhancer.config import (  # noqa: E402
+    _VALID_PROFILES,
     config_path,
     load_config,
     to_dict,
@@ -539,7 +540,7 @@ def run(argv: list[str] | None = None) -> int:
     )
     parser.add_argument(
         "--profile",
-        choices=("default", "concise", "detailed", "coding", "research"),
+        choices=_VALID_PROFILES,
         help="Rewrite profile (overrides config).",
     )
     parser.add_argument(
@@ -862,8 +863,135 @@ def init_main(argv) -> int:
     return 0
 
 
+def _fmt_usd(amount: float) -> str:
+    return f"${amount:.2f}" if amount >= 0.01 else f"${amount:.4f}"
+
+
+def _int_opt(argv, name: str):
+    """Value of ``--name N`` (or ``--name=N``) in argv, else None."""
+    for i, a in enumerate(argv):
+        if a == name and i + 1 < len(argv):
+            try:
+                return int(argv[i + 1])
+            except ValueError:
+                return None
+        if a.startswith(name + "="):
+            try:
+                return int(a.split("=", 1)[1])
+            except ValueError:
+                return None
+    return None
+
+
+def _local_stats(argv) -> int:
+    """`enhance-cli stats --local` -- what the ledger knows. Answers "is this actually
+    working, how often does it fail open, what is it costing" without external tooling."""
+    from prompt_enhancer import ledger
+
+    cfg = load_config()
+    days = _int_opt(argv, "--days")
+    records = ledger.read_records(cfg, days=days)
+    path = ledger.ledger_path(cfg)
+    if not records:
+        sys.stderr.write(f"no ledger records yet ({path}).\n")
+        if not cfg.ledger:
+            sys.stderr.write("the ledger is disabled: enhance-cli config set ledger true\n")
+        return 1
+
+    s = ledger.summarize(records)
+    w = sys.stdout.write
+    window = f"last {days} days" if days else "all time"
+    w(f"prompt-preflight stats  ({window})\n")
+    w(f"  ledger          : {path}\n")
+    w(f"  enhanced        : {s['enhanced']}\n")
+    pct = 100.0 * (1.0 - s["success_rate"]) if s["attempts"] else 0.0
+    w(f"  fail-open       : {s['fail_open']}  ({pct:.1f}% of attempts)\n")
+    w(f"  skipped early   : {s['skipped']}\n")
+    w(f"  median latency  : {s['median_elapsed']}s\n")
+    w(f"  spend           : {_fmt_usd(s['cost_usd'])}\n")
+    if s["enhanced"]:
+        w(f"  prompt growth   : {s['chars_in']} -> {s['chars_out']} chars\n")
+    if s["reasons"]:
+        w("  why it skipped  :\n")
+        for reason, n in list(s["reasons"].items())[:6]:
+            w(f"      {n:>5}  {reason}\n")
+    if s["projects"]:
+        w("  top projects    :\n")
+        for proj, n in list(s["projects"].items())[:6]:
+            w(f"      {n:>5}  {proj}\n")
+    if cfg.monthly_budget_usd > 0:
+        spent = ledger.month_to_date_cost(cfg)
+        w(f"  budget (month)  : {_fmt_usd(spent)} / {_fmt_usd(cfg.monthly_budget_usd)}\n")
+    return 0
+
+
+def digest_main(argv) -> int:
+    """`enhance-cli digest [--days 7]` -- a short periodic summary with a daily sparkline."""
+    from prompt_enhancer import ledger
+
+    cfg = load_config()
+    days = _int_opt(argv, "--days") or 7
+    records = ledger.read_records(cfg, days=days)
+    if not records:
+        sys.stderr.write("no ledger records in that window.\n")
+        return 1
+    s = ledger.summarize(records)
+    w = sys.stdout.write
+    w(f"prompt-preflight digest -- last {days} days\n\n")
+    w(f"  {s['enhanced']} prompts enhanced, {s['fail_open']} fell open, ")
+    w(f"{s['skipped']} skipped early\n")
+    w(f"  {_fmt_usd(s['cost_usd'])} spent, median {s['median_elapsed']}s per rewrite\n")
+    by_day = s["by_day"]
+    if by_day:
+        peak = max(by_day.values()) or 1
+        blocks = " .:-=+*#%@"
+        w("\n  daily volume:\n")
+        for day, n in by_day.items():
+            bar = blocks[min(len(blocks) - 1, int(n / peak * (len(blocks) - 1)))] * max(
+                1, int(n / peak * 30)
+            )
+            w(f"    {day}  {n:>4}  {bar}\n")
+    if s["projects"]:
+        w("\n  most enhanced projects:\n")
+        for proj, n in list(s["projects"].items())[:5]:
+            w(f"    {n:>5}  {proj}\n")
+    if s["reasons"]:
+        w("\n  fail-open reasons:\n")
+        for reason, n in list(s["reasons"].items())[:5]:
+            w(f"    {n:>5}  {reason}\n")
+    return 0
+
+
+def statusline_main(argv) -> int:
+    """`enhance-cli statusline` -- one compact line for Claude Code's statusLine setting.
+
+    Must be fast and must never fail: a broken statusline command is worse than no
+    statusline, so every error path prints an empty line and exits 0.
+    """
+    try:
+        from prompt_enhancer import ledger
+
+        cfg = load_config()
+        if not cfg.enabled or os.environ.get("PROMPT_ENHANCER_DISABLE"):
+            sys.stdout.write("preflight: off\n")
+            return 0
+        today = ledger.today_records(cfg)
+        s = ledger.summarize(today)
+        parts = [f"preflight {cfg.profile}", f"{s['enhanced']} ok"]
+        if s["fail_open"]:
+            parts.append(f"{s['fail_open']} skip")
+        if s["cost_usd"] >= 0.005:
+            parts.append(_fmt_usd(s["cost_usd"]))
+        sys.stdout.write(" | ".join(parts) + "\n")
+    except Exception:  # noqa: BLE001 -- never break the user's statusline
+        sys.stdout.write("\n")
+    return 0
+
+
 def stats_main(argv) -> int:
-    """`enhance-cli stats` -- pretty-print a running proxy's /stats."""
+    """`enhance-cli stats [--local]` -- local ledger summary, or a running proxy's /stats."""
+    if "--local" in argv or "-l" in argv:
+        return _local_stats(argv)
     import urllib.request
 
     cfg = load_config()
@@ -892,6 +1020,8 @@ def main() -> int:
         "doctor": doctor_main,
         "init": init_main,
         "stats": stats_main,
+        "digest": digest_main,
+        "statusline": statusline_main,
     }
     if argv and argv[0] in dispatch:
         return dispatch[argv[0]](argv[1:])

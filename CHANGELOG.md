@@ -6,6 +6,46 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-09-18
+
+### Added
+- **Usage ledger + observability.** A metadata-only, local-only ledger records one line per
+  decision -- never prompt text. New: `enhance-cli stats --local`, `enhance-cli digest
+  [--days N]`, and `enhance-cli statusline` (for Claude Code's `statusLine`). This answers
+  "is it working, how often does it fail open, what is it costing" from the tool itself,
+  instead of mining Claude Code transcripts.
+- **Spend cap.** `monthly_budget_usd` stops *enhancement* (never the prompt) once
+  month-to-date spend reaches the cap.
+- **Fail-open visibility.** `show_skips` makes the hook say why it skipped instead of
+  emitting nothing -- the silent mode that hid a `--bare` auth regression for months.
+- **14 more profiles (19 total):** debugging, review, refactor, testing, architecture,
+  performance, security, data, devops, docs, writing, brainstorm, explain, planning.
+- **`profile = "auto"`** selects a profile per prompt from its content, falling back to
+  `coding` inside a git repository.
+- **Conversation-aware rewriting.** The proxy passes the previous `conversation_turns`
+  turns as read-only context, so "now do the same for the other one" can resolve to
+  something concrete.
+- **Repo-aware rewriting.** `repo_context` supplies lightweight, non-sensitive project
+  facts (stack, whether it is a git repo) so rewrites use the project's real vocabulary.
+  No paths, repo names or file contents are included.
+- **Skip already-good prompts.** `skip_well_formed` avoids paying latency and cost to
+  rewrite a prompt that is already long, structured and specific.
+- **Prompt-injection guard.** `injection_guard` fails open when a rewrite introduces
+  instruction-override text or a domain the user never wrote -- the rewrite is fed
+  straight into a stronger, agentic model.
+- **Structured (JSON) output**, opt-in via `structured_output`. **Measured before
+  shipping:** Haiku emitted strict bare JSON 0/8 times (it always wraps in code fences)
+  but valid JSON *inside* the fences 8/8, so the parser is deliberately tolerant and the
+  feature ships OFF by default.
+
+### Fixed
+- `safety._domains` used `lstrip("www.")`, which strips *characters* rather than the
+  prefix -- it turned `wonderful.com` into `onderful.com`.
+
+### Changed
+- The test suite is sandboxed from the real ledger (conftest), so running tests can never
+  append synthetic records to a developer's usage history.
+
 ## [0.2.3] - 2026-06-03
 
 ### Fixed

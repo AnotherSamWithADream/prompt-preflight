@@ -147,7 +147,9 @@ enhance-cli --profile coding "speed up the parser"     # preserves code/paths/id
 enhance-cli --profile concise "..."                    # shortest faithful rewrite
 ```
 
-Choices: `default`, `concise`, `detailed`, `coding`, `research`.
+**19 profiles:** `default`, `concise`, `detailed`, `coding`, `research`, `debugging`, `review`, `refactor`, `testing`, `architecture`, `performance`, `security`, `data`, `devops`, `docs`, `writing`, `brainstorm`, `explain`, `planning`.
+
+Or set `profile = "auto"` to pick one **per prompt** from its content (a traceback gets `debugging`, a pytest question gets `testing`), falling back to `coding` inside a git repo.
 
 ---
 
@@ -301,7 +303,13 @@ The file is **plain JSON** (no comments). Common fields, with defaults:
 | Field | Meaning |
 |---|---|
 | `backend` | `auto` \| `cli` \| `api` \| `openai` \| `ollama` \| `heuristic` (or a plugin name) |
-| `profile` | rewrite style: `default` \| `concise` \| `detailed` \| `coding` \| `research` |
+| `profile` | rewrite style, or `auto` to choose per prompt (19 available) |
+| `repo_context` | give the rewriter the project's stack so it uses real vocabulary |
+| `conversation_turns` | prior turns the proxy passes so "do the same" resolves |
+| `skip_well_formed` | don't pay to rewrite an already-clear prompt |
+| `injection_guard` | reject a rewrite that adds override text or a new domain |
+| `ledger` | record metadata-only usage (never prompt text) |
+| `monthly_budget_usd` | stop enhancing (never blocks you) past this monthly spend |
 | `timeout` | seconds before fail-open |
 | `word_threshold` | prompts shorter than this pass through unchanged |
 | `bypass_prefix` | the skip token (default `//raw`) |
@@ -340,6 +348,9 @@ enhance-cli //raw "..."        bypass enhancement (copy verbatim)
 enhance-cli init               install the hook into ~/.claude/settings.json
 enhance-cli doctor             verify binary, flags, auth, and backend
 enhance-cli config show        view effective config
+enhance-cli stats --local      what the ledger knows: volume, fail-opens, spend
+enhance-cli digest --days 7    weekly summary with a daily sparkline
+enhance-cli statusline         one compact line for Claude Code's statusLine
 enhance-cli stats              pretty-print a running proxy's /stats
 ```
 

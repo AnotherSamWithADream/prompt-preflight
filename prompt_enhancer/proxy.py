@@ -132,6 +132,49 @@ def _extract_user_prompt(message: dict, marker: str = "<system-reminder"):
     return None, None
 
 
+def _plain_text(content, marker: str = "<system-reminder") -> str:
+    """Best-effort human-readable text of a message's content, skipping injected context
+    and non-text blocks (tool_result/tool_use/image). Returns "" when there is none."""
+    if isinstance(content, str):
+        return content.strip()
+    if isinstance(content, list):
+        parts = [
+            b.get("text", "")
+            for b in content
+            if isinstance(b, dict)
+            and b.get("type") == "text"
+            and marker not in (b.get("text") or "")
+        ]
+        return "\n".join(p.strip() for p in parts if p and p.strip()).strip()
+    return ""
+
+
+def _conversation_context(messages: list, cfg: Config) -> str:
+    """Compact transcript of the turns *before* the current one, so the rewriter can
+    resolve references like "it", "that file", "do the same for the other one".
+
+    Truncated per turn and capped in count -- this is reference material, not content, and
+    it must not dominate the rewrite call's cost.
+    """
+    turns = getattr(cfg, "conversation_turns", 0)
+    if turns <= 0 or not isinstance(messages, list) or len(messages) < 2:
+        return ""
+    lines = []
+    for msg in messages[:-1][-turns:]:
+        if not isinstance(msg, dict):
+            continue
+        role = msg.get("role")
+        if role not in ("user", "assistant"):
+            continue
+        text = _plain_text(msg.get("content"), cfg.proxy_reminder_marker)
+        if not text:
+            continue
+        if len(text) > 400:
+            text = text[:400] + " ..."
+        lines.append(f"{role}: {text}")
+    return "\n".join(lines)
+
+
 def _dump(payload: dict) -> bytes:
     return json.dumps(payload, ensure_ascii=False).encode("utf-8")
 
@@ -245,11 +288,12 @@ def rewrite_request_body(raw: bytes, cfg: Config, skip_texts=None, semaphore=Non
         return raw, False
 
     with _otel_span("prompt_preflight.enhance", cfg, {"model": model, "input_chars": len(text)}):
+        convo = _conversation_context(messages, cfg)
         if semaphore is not None:
             with semaphore:
-                result = enhance(decision.text, config=cfg)
+                result = enhance(decision.text, config=cfg, conversation=convo)
         else:
-            result = enhance(decision.text, config=cfg)
+            result = enhance(decision.text, config=cfg, conversation=convo)
     if not result.enhanced:
         _debug(f"skip: engine fail-open ({result.error})")
         return raw, False

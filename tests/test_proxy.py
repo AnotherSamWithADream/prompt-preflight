@@ -275,3 +275,55 @@ def test_concurrent_rewrites_are_safe(monkeypatch):
     assert not errors
     assert len(results) == 50
     assert all(did and matched for did, matched in results)
+
+
+# --- conversation context (reference resolution) ---------------------------- #
+
+
+def _convo_payload():
+    return {
+        "model": OPUS,
+        "tools": TOOLS,
+        "messages": [
+            {"role": "user", "content": "fix the parser bug in utils.py"},
+            {"role": "assistant", "content": "Done - it was an off-by-one."},
+            {"role": "user", "content": LONG},
+        ],
+    }
+
+
+def test_conversation_context_excludes_the_current_turn():
+    ctx = proxy._conversation_context(_convo_payload()["messages"], Config())
+    assert "user: fix the parser bug in utils.py" in ctx
+    assert "assistant: Done - it was an off-by-one." in ctx
+    assert LONG not in ctx  # the turn being rewritten is never part of its own context
+
+
+def test_conversation_context_disabled_by_config():
+    cfg = Config()
+    cfg.conversation_turns = 0
+    assert proxy._conversation_context(_convo_payload()["messages"], cfg) == ""
+
+
+def test_conversation_context_skips_tool_results_and_reminders():
+    msgs = [
+        {"role": "user", "content": [REMINDER, {"type": "text", "text": "real human text"}]},
+        {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "x", "content": "42"}]},
+        {"role": "user", "content": LONG},
+    ]
+    ctx = proxy._conversation_context(msgs, Config())
+    assert "real human text" in ctx
+    assert "system-reminder" not in ctx and "42" not in ctx
+
+
+def test_proxy_hands_conversation_to_the_engine(monkeypatch):
+    seen = {}
+
+    def fake_enhance(text, **kw):
+        seen.update(kw)
+        return EnhanceResult("ENHANCED", True, text)
+
+    monkeypatch.setattr(proxy, "enhance", fake_enhance)
+    new, did = proxy.rewrite_request_body(_body(_convo_payload()), Config())
+    assert did
+    assert "fix the parser bug in utils.py" in seen.get("conversation", "")

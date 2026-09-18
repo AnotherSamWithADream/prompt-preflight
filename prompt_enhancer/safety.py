@@ -137,3 +137,100 @@ def plausible_length(original: str, rewrite: str, lo: float, hi: float) -> bool:
         return True
     r = len(rewrite.strip())
     return lo * o <= r <= max(hi * o, _LEN_FLOOR_CHARS)
+
+
+# --------------------------------------------------------------------------- #
+# Prompt-injection hardening                                                  #
+# --------------------------------------------------------------------------- #
+
+# The rewrite is model output that gets injected into a *stronger, agentic* model's
+# context. A rewrite must never introduce instruction-override text the user did not
+# write. Each pattern only trips when it appears in the rewrite but NOT the original,
+# so a user who legitimately wrote "ignore the previous approach" is unaffected.
+_INJECTION_PATTERNS = [
+    (
+        "override",
+        re.compile(
+            r"(?i)\b(?:ignore|disregard|forget)\b[^.\n]{0,40}"
+            r"\b(?:previous|prior|above|earlier|all)\b[^.\n]{0,30}"
+            r"\b(?:instruction|prompt|rule|direction|context)"
+        ),
+    ),
+    ("role-marker", re.compile(r"(?im)^\s*(?:system|assistant)\s*:")),
+    ("persona-switch", re.compile(r"(?i)\byou are now\b|\bfrom now on,? you\b")),
+    ("new-instructions", re.compile(r"(?i)\bnew instructions?\s*:")),
+    ("tag-injection", re.compile(r"(?i)</?(?:system|system-reminder|instructions)\b")),
+]
+
+_URL_HOST = re.compile(r"(?i)https?://([^/\s)>\]]+)")
+
+
+def _domains(text: str) -> set:
+    out = set()
+    for host in _URL_HOST.findall(text):
+        h = host.lower()
+        # NB: prefix strip, not lstrip() -- lstrip("www.") would eat leading w/. characters
+        # and turn "wonderful.com" into "onderful.com".
+        if h.startswith("www."):
+            h = h[4:]
+        out.add(h)
+    return out
+
+
+def injection_risk(original: str, rewrite: str) -> str | None:
+    """Return a short label if the REWRITE introduces instruction-injection-looking
+    content (or a domain) absent from the original, else None.
+
+    Compared against the original so the guard only fires on text the model *added*.
+    """
+    for label, pat in _INJECTION_PATTERNS:
+        if pat.search(rewrite) and not pat.search(original):
+            return label
+    if _domains(rewrite) - _domains(original):
+        return "new-domain"
+    return None
+
+
+# --------------------------------------------------------------------------- #
+# "Already well-formed" detection -- don't pay for a no-op rewrite            #
+# --------------------------------------------------------------------------- #
+
+_LIST_LINE = re.compile(r"(?m)^\s*(?:[-*•]|\d+[.)])\s+\S")
+#: Hand-wavy words whose presence means the prompt still has something to clarify.
+_VAGUE_WORDS = frozenset(
+    {
+        "something",
+        "stuff",
+        "somehow",
+        "better",
+        "nicer",
+        "cleaner",
+        "faster",
+        "good",
+        "nice",
+        "etc",
+        "whatever",
+        "anything",
+        "properly",
+        "correctly",
+        "improve",
+        "optimize",
+    }
+)
+
+
+def looks_well_formed(text: str, min_words: int = 25, max_vague_ratio: float = 0.04) -> bool:
+    """True when a prompt is already long, structured/specific and not hand-wavy -- so
+    enhancement would add little. Deliberately conservative: when in doubt, return False
+    and let the rewriter run (a missed skip only costs a little; a wrong skip loses the
+    whole benefit of the tool)."""
+    stripped = text.strip()
+    words = stripped.split()
+    if len(words) < min_words:
+        return False
+    vague = sum(1 for w in words if w.strip(".,;:!?\"'()").lower() in _VAGUE_WORDS)
+    if vague / len(words) >= max_vague_ratio:
+        return False
+    structured = bool(_LIST_LINE.search(stripped))
+    specific = bool(important_tokens(stripped))
+    return structured or specific

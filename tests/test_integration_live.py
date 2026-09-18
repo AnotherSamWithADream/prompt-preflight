@@ -159,3 +159,42 @@ def test_launcher_drives_real_claude_through_proxy(capsys):
     assert "follow-up prompts are enhanced" in err
     # ...and real claude ran through that proxy and completed successfully.
     assert code == 0
+
+
+@pytest.mark.live
+@requires_live
+def test_conversation_context_does_not_leak_into_the_rewrite():
+    """#12 live: prior turns are reference material only. The rewrite must stay faithful to
+    the prompt's own specifics and must never echo the <context> block back out."""
+    from prompt_enhancer.config import Config
+
+    convo = (
+        "user: the parse_dates function in utils.py crashes on leap years\n"
+        "assistant: I fixed it by switching to datetime.strptime."
+    )
+    vague = "ok now do the same thing for the other one in helpers.py and add tests for it"
+    result = enhance(vague, config=Config(), conversation=convo)
+    if not result.enhanced:
+        pytest.skip(f"engine fail-open ({result.error}); claude unavailable")
+    low = result.text.lower()
+    assert "helpers.py" in low, "faithfulness: the prompt's own file must survive"
+    for leaked in ("<context>", "recent conversation", "project facts", "</context>"):
+        assert leaked not in low, f"context block leaked into the rewrite: {leaked!r}"
+
+
+@pytest.mark.live
+@requires_live
+def test_repo_context_does_not_leak_into_the_rewrite():
+    """#13 live: project facts are injected on the default path now, so prove they inform
+    the rewrite without appearing in it."""
+    from prompt_enhancer.config import Config
+
+    result = enhance(
+        "please make this rough prompt clearer and better structured for a stronger model",
+        config=Config(),
+    )
+    if not result.enhanced:
+        pytest.skip(f"engine fail-open ({result.error}); claude unavailable")
+    low = result.text.lower()
+    for leaked in ("<context>", "project facts", "stack:", "git repository"):
+        assert leaked not in low, f"repo context leaked into the rewrite: {leaked!r}"

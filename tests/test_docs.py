@@ -50,7 +50,8 @@ def test_to_dict_round_trips_every_field():
 
 
 def test_valid_profiles_match_system_prompt():
-    assert set(_VALID_PROFILES) == set(_PROFILE_SUFFIXES)
+    # "auto" is a selector, not a suffix -- every other accepted profile must have one.
+    assert set(_VALID_PROFILES) == set(_PROFILE_SUFFIXES) | {"auto"}
 
 
 def test_valid_backends_cover_engine_builtins():
